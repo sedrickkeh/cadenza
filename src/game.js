@@ -1343,6 +1343,10 @@ function boot() {
     for (const n of notes) laneQ[n.lane].push(n);
     const lanePtr = [0, 0, 0, 0];
     const endT = Math.max(song.events[song.events.length - 1].t + (song.events[song.events.length - 1].dur || 0), maxTail) + 1.6;
+    // a flawless run is deterministic (combo climbs 1..totalUnits), so
+    // normalizing by its multiplier-weighted sum pins the max score to 1M
+    let maxWeighted = 0;
+    for (let u = 1; u <= totalUnits; u++) maxWeighted += multFor(u);
 
     G.run = {
       song, diff, notes, laneQ, lanePtr,
@@ -1356,7 +1360,8 @@ function boot() {
       pops: [], flashes: [0, 0, 0, 0], particles: [],
       held: [false, false, false, false],
       earlyLate: { early: 0, late: 0 },
-      paused: false, done: false, base: 1000000 / totalUnits,
+      paused: false, done: false, failed: false, base: 1000000 / maxWeighted,
+      life: 100,
       activeHolds: [null, null, null, null],
       mult: 1, fever: false, milestonesHit: {}, announce: null, shock: null,
       imps: [], projectiles: [], impsSwatted: 0, impsEscaped: 0,
@@ -1364,6 +1369,8 @@ function boot() {
       glyphT: 0, lastFrameMs: performance.now(),
     };
     $('pauseMenu').classList.remove('open');
+    $('gLife').style.width = '100%';
+    $('gLife').classList.remove('low');
     $('gSong').textContent = song.title;
     $('gDiff').textContent = DIFF_CONFIG[diff].label;
     show('game');
@@ -1410,11 +1417,24 @@ function boot() {
     registerHit(kind, lane, d);
   }
 
+  const LIFE_REGEN = { perfect: 0.8, great: 0.5, good: 0.2 };
+  function healLife(amt) {
+    const r = G.run;
+    if (r) r.life = Math.min(100, r.life + amt);
+  }
+  function drainLife(amt) {
+    const r = G.run;
+    if (!r || r.done || r.failed) return;
+    r.life = Math.max(0, r.life - amt);
+    if (r.life <= 0) r.failed = true; // gameFrame ends the run at the frame boundary
+  }
+
   function registerHit(kind, lane, off) {
     const r = G.run;
     r.counts[kind]++;
     r.judged++;
     r.weightSum += JUDGE_WEIGHT[kind];
+    healLife(LIFE_REGEN[kind] || 0);
     r.combo++;
     if (r.combo > r.maxCombo) r.maxCombo = r.combo;
     r.mult = multFor(r.combo);
@@ -1448,6 +1468,7 @@ function boot() {
       h.state = 2;
       r.judged++; r.counts.miss++;
       r.combo = 0; r.mult = 1; r.fever = false;
+      drainLife(13);
       r.pops.push({ t: performance.now(), kind: 'drop', lane, off: 0 });
       spawnImp(true);
     }
@@ -1500,6 +1521,7 @@ function boot() {
             const units = n.hold ? 2 : 1;
             r.counts.miss += units; r.judged += units;
             r.combo = 0; r.mult = 1; r.fever = false;
+            drainLife(13);
             spawnImp(true);
             r.pops.push({ t: performance.now(), kind: 'miss', lane: l, off: 0 });
             r.lanePtr[l]++;
@@ -1517,6 +1539,7 @@ function boot() {
       updateImps(dtR, t);
       drawGame(t);
 
+      if (r.failed && !r.done) { r.done = true; Sound.stopAll(); finishGame(); return; }
       if (t > r.endT && !r.done) { r.done = true; finishGame(); return; }
     }
     raf = requestAnimationFrame(gameFrame);
@@ -1555,8 +1578,8 @@ function boot() {
     imp.state = 'splat'; imp.st = 0;
     imp.blot = [];
     for (let i = 0; i < 6; i++) imp.blot.push({ dx: (Math.random() - 0.5) * 26 * imp.s, dy: (Math.random() - 0.5) * 16 * imp.s, r: (2 + Math.random() * 5) * imp.s });
-    r.score += imp.val || 500; r.impsSwatted++;
-    r.pops.push({ t: performance.now(), kind: 'swat', lane: -1, x: imp.x, y: imp.y - 30 * imp.s, off: 0, val: imp.val || 500 });
+    healLife(2); r.impsSwatted++;
+    r.pops.push({ t: performance.now(), kind: 'swat', lane: -1, x: imp.x, y: imp.y - 30 * imp.s, off: 0 });
   }
 
   function damageImp(imp, fx, fy) {
@@ -1613,7 +1636,7 @@ function boot() {
         imp.y += (imp.ty - imp.y) / d * imp.speed * dt;
         if (Math.hypot(imp.x - px, imp.y - py) < 66) { imp.state = 'taunt'; imp.st = 0; }
       } else if (imp.state === 'taunt') {
-        if (imp.st > 1.2) { imp.state = 'gone'; r.impsEscaped++; }
+        if (imp.st > 1.2) { imp.state = 'gone'; r.impsEscaped++; drainLife(5); }
       } else if (imp.state === 'flee') {
         imp.vx = (imp.x < px ? -1 : 1) * imp.speed * 3.4;
         imp.x += imp.vx * dt;
@@ -1921,14 +1944,14 @@ function boot() {
       const style = {
         perfect: [ACCENT, 'Perfect'], great: [inkA(0.85), 'Great'],
         good: [inkA(0.6), 'Good'], miss: [inkA(0.4), 'Miss'],
-        swat: [ACCENT, '+' + (p.val || 500)],
+        swat: [ACCENT, 'Splat!'],
         drop: [inkA(0.5), 'Dropped'],
       }[p.kind];
       gctx.fillStyle = style[0];
       gctx.font = p.kind === 'swat' ? 'italic 600 12px Palatino, "Book Antiqua", Georgia, serif'
         : 'italic 600 16px Palatino, "Book Antiqua", Georgia, serif';
       gctx.fillText(style[1], cx, y);
-      if (p.kind !== 'perfect' && p.kind !== 'miss') {
+      if ((p.kind === 'great' || p.kind === 'good') && p.off !== 0) {
         gctx.font = 'italic 11px Palatino, "Book Antiqua", Georgia, serif';
         gctx.fillStyle = inkA(0.45);
         gctx.fillText(p.off < 0 ? 'early' : 'late', cx, y + 16);
@@ -1976,10 +1999,12 @@ function boot() {
 
     // HUD
     const acc = r.judged ? r.weightSum / r.judged : 1;
-    $('gScore').textContent = String(Math.round(r.score)).padStart(7, '0');
+    $('gScore').textContent = String(Math.min(1000000, Math.round(r.score))).padStart(7, '0');
     $('gAcc').textContent = (acc * 100).toFixed(2) + '%';
     const prog = clamp(t / r.endT, 0, 1);
     $('gProgress').style.width = (prog * 100) + '%';
+    $('gLife').style.width = r.life + '%';
+    $('gLife').classList.toggle('low', r.life <= 30);
   }
 
   function hexA(hex, a) {
@@ -2027,15 +2052,21 @@ function boot() {
     // resolve stragglers: pending notes miss; live holds complete
     for (let l = 0; l < 4; l++) {
       const h = r.activeHolds[l];
-      if (h) { r.activeHolds[l] = null; h.state = 3; r.judged++; r.weightSum += 1; r.counts.perfect++; }
+      if (h) {
+        r.activeHolds[l] = null; h.state = 3;
+        r.judged++; r.weightSum += 1; r.counts.perfect++;
+        r.combo++; if (r.combo > r.maxCombo) r.maxCombo = r.combo;
+        r.mult = multFor(r.combo);
+        r.score += r.base * r.mult;
+      }
     }
     for (const n of r.notes) if (n.state === 0) { n.state = 2; const u = n.hold ? 2 : 1; r.counts.miss += u; r.judged += u; }
     const acc = r.judged ? r.weightSum / r.judged : 0;
-    const [, grade, flavor] = gradeFor(acc);
-    const score = Math.round(r.score);
+    const [, grade, flavor] = r.failed ? [0, 'F', 'The imps win this page — the curtain falls early.'] : gradeFor(acc);
+    const score = Math.min(1000000, Math.round(r.score));
     const key = r.song.id + '|' + r.diff;
     const prev = G.scores[key];
-    const isBest = !prev || acc > prev.acc;
+    const isBest = !r.failed && (!prev || acc > prev.acc);
     if (isBest) {
       G.scores[key] = { score, acc, grade, combo: r.maxCombo, fc: r.counts.miss === 0 || (prev && prev.fc) || false };
       await store.set('cadenza:scores', G.scores);
@@ -2092,20 +2123,28 @@ function boot() {
     if (lane != null && G.run) { G.run.held[lane] = false; releaseLane(lane); }
   });
   // touch
+  const touchLanes = new Map(); // touch identifier -> lane, so lifting one finger only releases its own lane
   gc.addEventListener('touchstart', e => {
     e.preventDefault();
+    const rect = gc.getBoundingClientRect();
     for (const t of e.changedTouches) {
-      const rect = gc.getBoundingClientRect();
       const lane = clamp(Math.floor((t.clientX - rect.left) / (rect.width / 4)), 0, 3);
+      touchLanes.set(t.identifier, lane);
       if (G.run) { G.run.held[lane] = true; judge(lane); }
     }
   }, { passive: false });
-  gc.addEventListener('touchend', e => {
-    if (G.run) {
-      G.run.held = [false, false, false, false];
-      for (let l = 0; l < 4; l++) releaseLane(l);
+  function endTouch(e) {
+    for (const t of e.changedTouches) {
+      const lane = touchLanes.get(t.identifier);
+      touchLanes.delete(t.identifier);
+      if (lane == null || !G.run) continue;
+      let stillHeld = false;
+      for (const l of touchLanes.values()) if (l === lane) stillHeld = true;
+      if (!stillHeld) { G.run.held[lane] = false; releaseLane(lane); }
     }
-  });
+  }
+  gc.addEventListener('touchend', endTouch);
+  gc.addEventListener('touchcancel', endTouch);
   let mouseLane = -1;
   gc.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && G.run) {

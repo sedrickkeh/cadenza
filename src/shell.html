@@ -155,6 +155,10 @@ input[type=checkbox]{accent-color:var(--red);width:15px;height:15px}
 #pauseBtn:hover{color:var(--ink);border-color:var(--ink)}
 .progressTrack{height:2px;background:var(--ink-08);flex-shrink:0;margin:0 20px}
 #gProgress{height:100%;width:0;background:var(--ink);transition:width .2s linear}
+.lifeTrack{height:4px;background:var(--ink-08);flex-shrink:0;margin:3px 20px 0}
+#gLife{height:100%;width:100%;background:var(--red);transition:width .15s linear}
+#gLife.low{animation:lifePulse .55s ease-in-out infinite}
+@keyframes lifePulse{50%{opacity:.3}}
 #gameCanvas{flex:1;width:100%;touch-action:none}
 #pauseMenu{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
   background:rgba(242,236,221,.92)}
@@ -188,7 +192,7 @@ input[type=checkbox]{accent-color:var(--red);width:15px;height:15px}
 
 /* ---------- grades ---------- */
 .grade-SS,.grade-S{color:var(--red)} .grade-A{color:var(--ink)} .grade-B{color:var(--ink-70)}
-.grade-C{color:var(--ink-55)} .grade-D{color:var(--ink-35)}
+.grade-C{color:var(--ink-55)} .grade-D{color:var(--ink-35)} .grade-F{color:var(--red)}
 
 /* ---------- toast ---------- */
 #toast{position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom));transform:translate(-50%,16px);z-index:60;
@@ -240,6 +244,7 @@ input[type=checkbox]{accent-color:var(--red);width:15px;height:15px}
       <button id="pauseBtn" title="Pause (Esc)">&#10073;&#10073;</button></div>
   </div>
   <div class="progressTrack"><div id="gProgress"></div></div>
+  <div class="lifeTrack" title="Ink"><div id="gLife"></div></div>
   <canvas id="gameCanvas"></canvas>
 </div>
 

@@ -29,6 +29,10 @@ Hold notes: press on the head, keep it down until the tail.
   procedurally seeded streams (jacks, trills, rolls) on the top tiers
 - **Marginalia imps** — knockback, HP, taunts, and a Crescendo fever mode at
   25 combo; score multiplier ladder, milestone shockwaves, full-combo seals
+- **Normalized scoring** — every chart tops out at exactly 1,000,000, so
+  scores are comparable across songs and difficulties
+- **Ink gauge** — misses and escaped imps bleed ink; hits (and swatted imps)
+  restore it. Run dry and the recital ends early.
 - **Synthesized audio** — a celesta-like tone via Web Audio; no audio files
 
 ## Development
