@@ -27,15 +27,17 @@ Hold notes: press on the head, keep it down until the tail.
   and MIDI (`.mid`/`.midi`) parsed in-browser; charts generated per difficulty
 - **Four difficulties** — Easy through Virtuoso, with hold notes and
   procedurally seeded streams (jacks, trills, rolls) on the top tiers
-- **Marginalia imps** — they march on the pianist's inkwell and siphon your
-  ink while they drink; knockback, HP, and a Crescendo fever mode at 25 combo
-  that scares them off; score multiplier ladder, milestone shockwaves,
-  full-combo seals
+- **Marginalia imps ride the chart** — dense streams descend as a visible
+  swarm, every hold note carries a heavyweight, and stray notes hitch a
+  rider. Hit the note and its imp is squashed; miss it and the imp lands on
+  the page and gnaws your ink away until your hits splat it. Knockback, HP,
+  and a Crescendo fever mode at 25 combo that scares them off; score
+  multiplier ladder, milestone shockwaves, full-combo seals
 - **Normalized scoring** — every chart tops out at exactly 1,000,000, so
   scores are comparable across songs and difficulties
-- **Ink gauge** — misses bleed ink and drinking imps drain it; hits restore
-  it, and splatting a drinker splashes back most of what it stole. Run dry
-  and the recital ends early.
+- **Ink gauge** — misses bleed ink and gnawing imps drain it; hits restore
+  it, and splatting an imp splashes back most of what it stole. Run dry and
+  the recital ends early.
 - **Synthesized audio** — a celesta-like tone via Web Audio; no audio files
 
 ## Development

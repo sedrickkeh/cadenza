@@ -1337,6 +1337,24 @@ function boot() {
     const chart = buildChart(song.events, diff, song.bpmHint);
     if (!chart.length) { toast('That chart came out empty \u2014 try another difficulty.', true); return; }
     const notes = chart.map((n, i) => ({ ...n, i, state: 0 })); // 0 pending, 1 holding, 2 missed, 3 done
+    // imps ride the chart itself: every hold carries a heavyweight, dense
+    // streams carry a swarm, and a few stragglers hitch on anywhere
+    const rideProb = { easy: 5, normal: 10, hard: 14, virtuoso: 18 }[diff] || 10;
+    for (const n of notes) {
+      if (!n.hold) continue;
+      const dur = n.tailT - n.t;
+      n.imp = dur >= 0.9 ? { s: 2.7, hp: 3 } : { s: 2.1, hp: 2 };
+    }
+    let runStart = 0;
+    for (let i = 1; i <= notes.length; i++) {
+      if (i === notes.length || notes[i].t - notes[i - 1].t > 0.22) {
+        if (i - runStart >= 5) for (let j = runStart; j < i; j++) notes[j].imp = notes[j].imp || { s: 1.05, hp: 1 };
+        runStart = i;
+      }
+    }
+    for (const n of notes) {
+      if (!n.imp && ((n.i * 2654435761) >>> 0) % 100 < rideProb) n.imp = { s: 1.5, hp: 1 };
+    }
     const totalUnits = notes.reduce((s, n) => s + (n.hold ? 2 : 1), 0);
     const maxTail = notes.reduce((m, n) => Math.max(m, n.hold ? n.tailT : n.t), 0);
     const laneQ = [[], [], [], []];
@@ -1365,7 +1383,6 @@ function boot() {
       activeHolds: [null, null, null, null],
       mult: 1, fever: false, milestonesHit: {}, announce: null, shock: null,
       imps: [], projectiles: [], impsSwatted: 0, impsEscaped: 0,
-      impSpawnT: 2.2, impInterval: { easy: 2.9, normal: 1.9, hard: 1.4, virtuoso: 1.1 }[diff] || 1.9,
       glyphT: 0, lastFrameMs: performance.now(),
     };
     $('pauseMenu').classList.remove('open');
@@ -1413,7 +1430,7 @@ function boot() {
     const ad = Math.abs(d);
     const kind = ad <= JUDGE.perfect ? 'perfect' : ad <= JUDGE.great ? 'great' : 'good';
     if (best.hold) { best.state = 1; r.activeHolds[lane] = best; }
-    else best.state = 3;
+    else { best.state = 3; if (best.imp) squashRider(best, lane); }
     registerHit(kind, lane, d);
   }
 
@@ -1443,7 +1460,7 @@ function boot() {
     r.fever = r.combo >= 25;
     if (r.fever && !wasFever) {
       r.announce = { text: 'Crescendo!', t: performance.now() };
-      for (const imp of r.imps) if (imp.state === 'walk' || imp.state === 'drink') imp.state = 'flee';
+      for (const imp of r.imps) if (imp.state === 'gnaw') imp.state = 'flee';
     }
     if (MILESTONES.includes(r.combo) && !r.milestonesHit[r.combo]) {
       r.milestonesHit[r.combo] = 1;
@@ -1463,14 +1480,14 @@ function boot() {
     if (!h) return;
     r.activeHolds[lane] = null;
     const t = pos();
-    if (t >= h.tailT - 0.15) { h.state = 3; registerHit('perfect', lane, 0); }
+    if (t >= h.tailT - 0.15) { h.state = 3; if (h.imp) squashRider(h, lane); registerHit('perfect', lane, 0); }
     else {
       h.state = 2;
       r.judged++; r.counts.miss++;
       r.combo = 0; r.mult = 1; r.fever = false;
       drainLife(13);
       r.pops.push({ t: performance.now(), kind: 'drop', lane, off: 0 });
-      spawnImp(true);
+      if (h.imp) spawnLooseImp(lane, h.imp); // the heavyweight jumps off onto the page
     }
   }
 
@@ -1522,7 +1539,7 @@ function boot() {
             r.counts.miss += units; r.judged += units;
             r.combo = 0; r.mult = 1; r.fever = false;
             drainLife(13);
-            spawnImp(true);
+            if (n.imp) spawnLooseImp(l, n.imp); // its rider lands and starts gnawing
             r.pops.push({ t: performance.now(), kind: 'miss', lane: l, off: 0 });
             r.lanePtr[l]++;
           } else if (n.state !== 0) {
@@ -1533,7 +1550,7 @@ function boot() {
 
       for (let l = 0; l < 4; l++) {
         const h = r.activeHolds[l];
-        if (h && t > h.tailT) { r.activeHolds[l] = null; h.state = 3; registerHit('perfect', l, 0); }
+        if (h && t > h.tailT) { r.activeHolds[l] = null; h.state = 3; if (h.imp) squashRider(h, l); registerHit('perfect', l, 0); }
       }
 
       updateImps(dtR, t);
@@ -1549,27 +1566,35 @@ function boot() {
   function multFor(c) { return c >= 50 ? 1.5 : c >= 25 ? 1.25 : c >= 10 ? 1.1 : 1; }
   const MILESTONES = [10, 25, 50, 100, 150, 200, 250, 300, 400, 500];
 
-  function spawnImp(force) {
+  function laneX(lane) {
+    const w = playW(), lw = w / 4;
+    return (gc.clientWidth - w) / 2 + lane * lw + lw / 2;
+  }
+
+  // a missed note's rider lands on the page below its lane and gnaws
+  // at the paper, bleeding ink until it is splatted or has eaten its fill
+  function spawnLooseImp(lane, rider) {
     const r = G.run; if (!r) return;
-    const active = r.imps.filter(i => i.state === 'walk' || i.state === 'drink').length;
-    if (active >= (force ? 15 : 12)) return;
-    const W = gc.clientWidth, H = gc.clientHeight;
-    const hy = hitY();
-    const roll = Math.random();
-    let x, y;
-    if (roll < 0.4) { x = -36; y = 60 + Math.random() * Math.max(60, hy - 170); }
-    else if (roll < 0.8) { x = W + 36; y = 60 + Math.random() * Math.max(60, hy - 170); }
-    else { x = W * (0.15 + Math.random() * 0.7); y = -36; }
-    const s = 1.7 + Math.random() * 0.6;
-    const hp = s > 2.12 ? 3 : s > 1.9 ? 2 : 1;
-    const spdF = { easy: 0.85, normal: 1, hard: 1.2, virtuoso: 1.35 }[r.diff] || 1;
+    if (r.imps.filter(i => i.state === 'gnaw').length >= 14) return;
+    const x = clamp(laneX(lane) + (Math.random() - 0.5) * 36, 20, gc.clientWidth - 20);
+    const y = hitY() + 34 + Math.random() * 22;
     r.imps.push({
-      x, y, tx: x, ty: y, wpT: 0, vx: 0, s, hp, hitT: 0,
-      drunk: 0,
-      speed: (46 + Math.random() * 26) * spdF,
+      x, y, hx: x, hy: y, vx: 0, s: rider.s + 0.4, hp: rider.hp, hitT: 0,
+      drunk: 0, fill: 4 + 3 * rider.hp,
       phase: Math.random() * 10, variant: Math.floor(Math.random() * 3),
-      state: 'walk', st: 0, blot: null,
+      state: 'gnaw', st: 0, blot: null,
     });
+  }
+
+  // a rider whose note was hit gets squashed on the spot
+  function squashRider(n, lane) {
+    const r = G.run;
+    const imp = {
+      x: laneX(lane), y: hitY() + 6, s: n.imp.s, hp: 0, hitT: 0,
+      drunk: 0, phase: 0, variant: 0, state: 'gnaw', st: 0, blot: null,
+    };
+    r.imps.push(imp);
+    splatImp(imp);
   }
 
   function splatImp(imp) {
@@ -1578,7 +1603,7 @@ function boot() {
     imp.state = 'splat'; imp.st = 0;
     imp.blot = [];
     for (let i = 0; i < 6; i++) imp.blot.push({ dx: (Math.random() - 0.5) * 26 * imp.s, dy: (Math.random() - 0.5) * 16 * imp.s, r: (2 + Math.random() * 5) * imp.s });
-    healLife(2 + imp.drunk * 0.6); r.impsSwatted++; // splashes back most of what it stole
+    healLife(1 + imp.s + imp.drunk * 0.6); r.impsSwatted++; // splashes back most of what it stole
     r.pops.push({ t: performance.now(), kind: 'swat', lane: -1, x: imp.x, y: imp.y - 30 * imp.s, off: 0 });
   }
 
@@ -1588,80 +1613,50 @@ function boot() {
     imp.hp--;
     if (imp.hp <= 0) { splatImp(imp); return; }
     imp.hitT = 0.3;
-    if (imp.state === 'drink') imp.state = 'walk'; // knocked off the well
     const d = Math.hypot(imp.x - fx, imp.y - fy) || 1;
     imp.x = clamp(imp.x + (imp.x - fx) / d * 46, 16, gc.clientWidth - 16);
     imp.y = clamp(imp.y + (imp.y - fy) / d * 32, 34, gc.clientHeight - 22);
-    imp.wpT = 0;
     for (let i = 0; i < 3; i++) r.particles.push({ type: 'drop', x: imp.x, y: imp.y - 10 * imp.s, vx: (Math.random() - 0.5) * 130, vy: -60 - Math.random() * 60, life: 1, red: false });
   }
 
-  function fireProjectile(laneX, kind) {
+  function fireProjectile(fromX, kind) {
     const r = G.run;
     let best = null, bd = 1e9;
     for (const imp of r.imps) {
-      if (imp.state !== 'walk' && imp.state !== 'drink') continue;
-      const d = Math.abs(imp.x - laneX) * (imp.state === 'drink' ? 0.4 : 1); // drinkers first
+      if (imp.state !== 'gnaw') continue;
+      const d = Math.abs(imp.x - fromX);
       if (d < bd) { bd = d; best = imp; }
     }
     if (!best) return;
-    r.projectiles.push({ x: laneX, y: hitY() + 6, target: best, red: kind === 'perfect', rot: Math.random() * 6 });
+    r.projectiles.push({ x: fromX, y: hitY() + 6, target: best, red: kind === 'perfect', rot: Math.random() * 6 });
   }
-
-  function wellPos() { return { x: gc.clientWidth / 2 - 46, y: gc.clientHeight - 14 }; }
-  const IMP_FILL = 9;          // ink an imp drinks before it scampers off sated
-  const DRINK_SLOTS = [-14, 14, -26, 26]; // latch offsets around the well rim
 
   function updateImps(dt, t) {
     const r = G.run;
     const W = gc.clientWidth, H = gc.clientHeight;
-    const well = wellPos();
-    const px = well.x, py = well.y - 8;
-    if (t > 1 && !r.done) {
-      r.impSpawnT -= dt * (r.fever ? 0.35 : 1);
-      if (r.impSpawnT <= 0) {
-        spawnImp(false);
-        const ramp = 1 - 0.3 * clamp(t / r.endT, 0, 1);
-        r.impSpawnT = r.impInterval * ramp * (0.7 + Math.random() * 0.6);
-      }
-    }
     for (let i = r.imps.length - 1; i >= 0; i--) {
       const imp = r.imps[i];
       imp.st += dt;
       if (imp.hitT > 0) imp.hitT -= dt;
-      if (imp.state === 'walk') {
-        imp.wpT -= dt;
-        if (imp.wpT <= 0 || Math.hypot(imp.tx - imp.x, imp.ty - imp.y) < 10) {
-          imp.tx = clamp(imp.x + (px - imp.x) * (0.22 + Math.random() * 0.33) + (Math.random() - 0.5) * 150, 24, W - 24);
-          imp.ty = clamp(imp.y + (py - imp.y) * (0.18 + Math.random() * 0.3) + (Math.random() - 0.5) * 100, 36, H - 24);
-          imp.wpT = 1.3 + Math.random() * 1.7;
+      if (imp.state === 'gnaw') {
+        const d = Math.hypot(imp.hx - imp.x, imp.hy - imp.y);
+        if (d > 6) { // scurries back to its gnawing spot after a knockback
+          imp.vx = (imp.hx - imp.x) / d * 140;
+          imp.x += imp.vx * dt;
+          imp.y += (imp.hy - imp.y) / d * 140 * dt;
+        } else {
+          imp.vx = 0;
+          const bite = (1 + imp.hp) * dt; // fatter imps gnaw faster
+          imp.drunk += bite;
+          drainLife(bite);
+          if (Math.random() < dt * 5) r.particles.push({
+            type: 'drop', x: imp.x + (Math.random() - 0.5) * 10, y: imp.y - 10 * imp.s,
+            vx: (Math.random() - 0.5) * 50, vy: -30 - Math.random() * 40, life: 1, red: true,
+          });
+          if (imp.drunk >= imp.fill) { imp.state = 'flee'; r.impsEscaped++; }
         }
-        const d = Math.hypot(imp.tx - imp.x, imp.ty - imp.y) || 1;
-        imp.vx = (imp.tx - imp.x) / d * imp.speed;
-        imp.x += imp.vx * dt;
-        imp.y += (imp.ty - imp.y) / d * imp.speed * dt;
-        if (Math.hypot(imp.x - px, imp.y - py) < 54) {
-          const drinkers = r.imps.filter(o => o.state === 'drink').length;
-          if (drinkers < DRINK_SLOTS.length) {
-            imp.state = 'drink'; imp.st = 0;
-            imp.lx = px + DRINK_SLOTS[drinkers]; imp.ly = py + 4;
-          }
-          // no free spot at the well: keep milling around it hungrily
-        }
-      } else if (imp.state === 'drink') {
-        const ease = Math.min(1, dt * 5);
-        imp.x += (imp.lx - imp.x) * ease;
-        imp.y += (imp.ly - imp.y) * ease;
-        const sip = (2 + imp.hp) * dt; // fatter imps gulp faster
-        imp.drunk += sip;
-        drainLife(sip);
-        if (Math.random() < dt * 6) r.particles.push({
-          type: 'drop', x: imp.x + (Math.random() - 0.5) * 8, y: imp.y - 14 * imp.s,
-          vx: (Math.random() - 0.5) * 40, vy: -30 - Math.random() * 40, life: 1, red: true,
-        });
-        if (imp.drunk >= IMP_FILL) { imp.state = 'flee'; r.impsEscaped++; }
       } else if (imp.state === 'flee') {
-        imp.vx = (imp.x < px ? -1 : 1) * imp.speed * 3.4;
+        imp.vx = (imp.x < W / 2 ? -1 : 1) * 260;
         imp.x += imp.vx * dt;
         if (imp.x < -44 || imp.x > W + 44) imp.state = 'gone';
       } else if (imp.state === 'splat' && imp.st > 0.7) imp.state = 'gone';
@@ -1673,7 +1668,7 @@ function boot() {
         let best = null, bd = 1e9;
         for (const imp of r.imps) {
           if (imp.state === 'splat' || imp.state === 'gone') continue;
-          const d = Math.hypot(imp.x - p.x, imp.y - p.y) * (imp.state === 'drink' ? 0.4 : 1); // drinkers first
+          const d = Math.hypot(imp.x - p.x, imp.y - p.y);
           if (d < bd) { bd = d; best = imp; }
         }
         if (!best) { r.projectiles.splice(i, 1); continue; }
@@ -1687,7 +1682,7 @@ function boot() {
         const hx = tx, hly = ty;
         damageImp(p.target, p.x, p.y);
         if (p.red) for (const imp of r.imps) {
-          if ((imp.state === 'walk' || imp.state === 'drink') && Math.hypot(imp.x - hx, imp.y - hly) < 84 && imp !== p.target) damageImp(imp, hx, hly);
+          if (imp.state === 'gnaw' && Math.hypot(imp.x - hx, imp.y - hly) < 84 && imp !== p.target) damageImp(imp, hx, hly);
         }
         r.projectiles.splice(i, 1);
       } else {
@@ -1698,7 +1693,7 @@ function boot() {
     if (r.shock) {
       r.shock.rad += 1050 * dt; r.shock.life -= dt * 1.3;
       for (const imp of r.imps) {
-        if ((imp.state === 'walk' || imp.state === 'drink') && Math.hypot(imp.x - px, imp.y - py) < r.shock.rad) splatImp(imp);
+        if (imp.state === 'gnaw' && Math.hypot(imp.x - W / 2, imp.y - hitY()) < r.shock.rad) splatImp(imp);
       }
       if (r.shock.life <= 0) r.shock = null;
     }
@@ -1706,7 +1701,7 @@ function boot() {
       r.glyphT -= dt;
       if (r.glyphT <= 0) {
         r.glyphT = 0.5;
-        r.particles.push({ type: 'glyph', x: px + (Math.random() - 0.5) * 56, y: H - 54, vx: (Math.random() - 0.5) * 16, vy: -36, life: 1, red: Math.random() < 0.4 });
+        r.particles.push({ type: 'glyph', x: W / 2 + (Math.random() - 0.5) * 56, y: H - 54, vx: (Math.random() - 0.5) * 16, vy: -36, life: 1, red: Math.random() < 0.4 });
       }
     }
   }
@@ -1721,21 +1716,12 @@ function boot() {
       gctx.globalAlpha = 1;
       return;
     }
-    const hop = imp.state === 'drink' ? Math.abs(Math.sin(imp.st * 6)) * 3 : 0;
+    const gnawing = imp.state === 'gnaw' && !imp.vx;
+    const hop = gnawing ? Math.abs(Math.sin(imp.st * 10)) * 2.5 : 0;
     const lean = imp.state === 'flee' ? (imp.vx < 0 ? -0.28 : 0.28)
-      : imp.state === 'drink' ? Math.sin(imp.st * 6) * 0.1 - 0.12
+      : gnawing ? Math.sin(imp.st * 10) * 0.09
+      : imp.state === 'ride' ? wob * 0.1
       : clamp((imp.vx || 0) / 220, -0.18, 0.18) + wob * 0.05;
-    if (imp.state === 'drink') {
-      // siphon of stolen ink, from the well to the imp's mouth
-      const well = wellPos();
-      gctx.strokeStyle = ACCENT; gctx.lineWidth = 1.5;
-      gctx.globalAlpha = 0.45 + Math.sin(imp.st * 12) * 0.2;
-      gctx.beginPath();
-      gctx.moveTo(well.x, well.y - 10);
-      gctx.quadraticCurveTo((well.x + imp.x) / 2, Math.min(well.y, imp.y) - 18, imp.x, imp.y - 12 * imp.s);
-      gctx.stroke();
-      gctx.globalAlpha = 1;
-    }
     gctx.save();
     gctx.translate(imp.x, imp.y - hop * imp.s);
     gctx.scale(imp.s, imp.s);
@@ -1769,53 +1755,12 @@ function boot() {
     gctx.restore();
   }
 
-  function drawInkwell() {
-    const r = G.run;
-    const w = wellPos();
-    const lvl = clamp(r.life / 100, 0, 1);
-    gctx.save();
-    gctx.strokeStyle = INK; gctx.lineWidth = 1.6;
-    gctx.fillStyle = PAPER;
-    // squat bottle: body, shoulder, neck
-    gctx.beginPath();
-    gctx.moveTo(w.x - 9, w.y);
-    gctx.lineTo(w.x - 9, w.y - 12);
-    gctx.quadraticCurveTo(w.x - 9, w.y - 16, w.x - 4, w.y - 17);
-    gctx.lineTo(w.x - 4, w.y - 21);
-    gctx.lineTo(w.x + 4, w.y - 21);
-    gctx.lineTo(w.x + 4, w.y - 17);
-    gctx.quadraticCurveTo(w.x + 9, w.y - 16, w.x + 9, w.y - 12);
-    gctx.lineTo(w.x + 9, w.y);
-    gctx.closePath();
-    gctx.fill();
-    // remaining ink — this is the life gauge, in the flesh
-    gctx.save();
-    gctx.clip();
-    gctx.fillStyle = ACCENT;
-    gctx.fillRect(w.x - 9, w.y - 15 * lvl, 18, 15 * lvl);
-    gctx.restore();
-    gctx.stroke();
-    line(w.x - 5, w.y - 21, w.x + 5, w.y - 21);
-    gctx.restore();
-  }
-
-  function drawPianist(t) {
-    const r = G.run;
-    const W = gc.clientWidth, H = gc.clientHeight;
-    const cx = W / 2 - 12, by = H - 8;
-    const spb = 60 / (r.song.bpmHint || 120);
-    const bob = Math.sin((t / spb) * Math.PI) * 2;
-    gctx.lineWidth = 1.6;
-    gctx.fillStyle = inkA(0.06); gctx.strokeStyle = INK;
-    gctx.beginPath(); gctx.rect(cx + 6, by - 44, 34, 44); gctx.fill(); gctx.stroke();
-    gctx.strokeStyle = inkA(0.8);
-    line(cx + 6, by - 27, cx + 40, by - 27);
-    for (let k = 0; k < 6; k++) line(cx + 10 + k * 5, by - 27, cx + 10 + k * 5, by - 22);
-    gctx.strokeStyle = INK;
-    line(cx - 16, by, cx - 16, by - 12); line(cx - 22, by - 12, cx - 10, by - 12);
-    gctx.beginPath(); gctx.arc(cx - 12, by - 33 + bob, 5, 0, Math.PI * 2); gctx.stroke();
-    line(cx - 12, by - 28 + bob, cx - 14, by - 13);
-    line(cx - 12, by - 25 + bob, cx + 8, by - 25 + bob * 1.6);
+  // an imp perched on a falling notehead
+  function drawRider(x, y, def, t, seed) {
+    drawImp({
+      x, y: y - 5, s: def.s, hp: def.hp, hitT: 0, vx: 0, drunk: 0,
+      st: t, phase: seed * 1.7, variant: seed % 3, state: 'ride', blot: null,
+    }, t);
   }
 
   function line(a, b, c, d) { gctx.beginPath(); gctx.moveTo(a, b); gctx.lineTo(c, d); gctx.stroke(); }
@@ -1902,8 +1847,6 @@ function boot() {
     }
 
     // — the pianist and the marginalia imps —
-    drawPianist(Math.max(0, t));
-    drawInkwell();
     for (const imp of r.imps) drawImp(imp, Math.max(0, t));
     gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
     for (const p of r.projectiles) {
@@ -1952,6 +1895,7 @@ function boot() {
         // head: half-note style
         if (dead) { gctx.globalAlpha = 0.3; notehead(cx, headY, 'holdHead'); gctx.globalAlpha = 1; }
         else notehead(cx, headY, holding ? 'holdActive' : 'holdHead');
+        if (n.imp && !dead) drawRider(cx, headY, n.imp, holding ? t * 2.5 : t, n.i); // wriggles harder while pinned
         if (holding && Math.random() < 0.3) {
           r.particles.push({ type: 'drop', x: cx + (Math.random() - 0.5) * 16, y: hy - 6, vx: (Math.random() - 0.5) * 40, vy: -70 - Math.random() * 50, life: 0.7, red: true });
         }
@@ -1964,6 +1908,7 @@ function boot() {
           gctx.globalAlpha = 1;
         } else {
           notehead(cx, y, 'fill');
+          if (n.imp) drawRider(cx, y, n.imp, t, n.i);
         }
       }
     }
@@ -2115,6 +2060,7 @@ function boot() {
       const h = r.activeHolds[l];
       if (h) {
         r.activeHolds[l] = null; h.state = 3;
+        if (h.imp) { r.impsSwatted++; h.imp = null; }
         r.judged++; r.weightSum += 1; r.counts.perfect++;
         r.combo++; if (r.combo > r.maxCombo) r.maxCombo = r.combo;
         r.mult = multFor(r.combo);
@@ -2154,7 +2100,7 @@ function boot() {
     let timing = (elh.early || elh.late)
       ? (elh.early > elh.late * 1.5 ? 'You tend to rush \u2014 breathe.' : elh.late > elh.early * 1.5 ? 'You tend to drag \u2014 anticipate.' : 'Nicely balanced timing.')
       : '';
-    if (r.impsEscaped) timing += (timing ? ' ' : '') + r.impsEscaped + (r.impsEscaped === 1 ? ' imp' : ' imps') + ' drank their fill from your inkwell.';
+    if (r.impsEscaped) timing += (timing ? ' ' : '') + r.impsEscaped + (r.impsEscaped === 1 ? ' imp' : ' imps') + ' ate their fill of your ink and got away.';
     $('rTiming').textContent = timing;
     $('rNewBest').style.display = isBest && prev ? 'inline-block' : (isBest && !prev ? 'inline-block' : 'none');
     if (raf) cancelAnimationFrame(raf);
