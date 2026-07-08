@@ -1,0 +1,12 @@
+{
+  "name": "cadenza",
+  "version": "1.0.0",
+  "description": "A rhythm game played on the printed score itself — ink, paper, and marginalia imps.",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test/test.js && node build.js && node test/smoke.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}
