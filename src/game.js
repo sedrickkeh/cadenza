@@ -997,6 +997,7 @@ const Sound = {
 const INK = '#231f18';
 const ACCENT = '#a8352a';
 const PAPER = '#f2ecdd';
+const IMP_COLORS = ['#e07a52', '#5b9e97', '#b088c9', '#dfa73f', '#87a964'];
 function inkA(a) { return 'rgba(35,31,24,' + a + ')'; }
 function accA(a) { return 'rgba(168,53,42,' + a + ')'; }
 function roman(n) {
@@ -1557,8 +1558,19 @@ function boot() {
       updateImps(dtR, t);
       drawGame(t);
 
-      if (r.failed && !r.done) { r.done = true; Sound.stopAll(); finishGame(); return; }
-      if (t > r.endT && !r.done) { r.done = true; finishGame(); return; }
+      if (!r.outro && (r.failed || t > r.endT)) {
+        r.done = true;
+        r.outro = { type: r.failed ? 'fail' : 'clear', t0: performance.now(), dur: r.failed ? 1000 : 1700 };
+        if (r.failed) {
+          Sound.stopAll();
+          const now = Sound.ctx.currentTime; // a low, sour curtain sting
+          for (const m of [26, 27, 32]) Sound.playTone(m, now + 0.02, 1.6, 0.85);
+        }
+      }
+      if (r.outro) {
+        drawCurtains(Math.min(1, (performance.now() - r.outro.t0) / r.outro.dur), r.outro.type);
+        if (performance.now() - r.outro.t0 > r.outro.dur + 700) { finishGame(); return; }
+      }
     }
     raf = requestAnimationFrame(gameFrame);
   }
@@ -1572,24 +1584,38 @@ function boot() {
     return (gc.clientWidth - w) / 2 + lane * lw + lw / 2;
   }
 
-  // each marked note sends an escort imp in from the page edge, timed to
-  // arrive below its lane just as the note reaches the barline
+  // imps live in the page margins, never inside the printed system:
+  // a hard wall at the playfield edge keeps them off the staff
+  function marginWall(side) {
+    const w = playW(), x0 = (gc.clientWidth - w) / 2;
+    return side < 0 ? Math.max(24, x0 - 16) : Math.min(gc.clientWidth - 24, x0 + w + 16);
+  }
+  function clampMargin(imp) {
+    if (!imp.side) return;
+    if (imp.side < 0) imp.x = clamp(imp.x, 10, marginWall(-1));
+    else imp.x = clamp(imp.x, marginWall(1), gc.clientWidth - 10);
+  }
+
+  // each marked note sends an escort imp along the page margin, timed to
+  // arrive beside its lane just as the note reaches the barline
   function spawnEscort(n, t) {
     const r = G.run;
     if (r.imps.filter(i => i.state === 'come' || i.state === 'menace').length >= 16) return;
-    const W = gc.clientWidth;
-    const fromLeft = (n.lane < 2) !== (Math.random() < 0.2);
-    const x = fromLeft ? -30 : W + 30;
-    const y = clamp(hitY() * (0.45 + Math.random() * 0.4) + Math.random() * 60, 60, gc.clientHeight - 26);
-    const hx = clamp(laneX(n.lane) + (Math.random() - 0.5) * 44, 20, W - 20);
-    const hy = hitY() + 30 + Math.random() * 26;
+    const side = n.lane < 2 ? -1 : 1; // outer lanes' side of the page
+    const wall = marginWall(side);
+    const hx = clamp(wall - side * Math.random() * 60, 10, gc.clientWidth - 10);
+    const hy = clamp(hitY() - 26 + Math.random() * 70, 60, gc.clientHeight - 26);
     const imp = {
-      x, y, hx, hy, vx: 0, s: n.imp.s, hp: n.imp.hp, hitT: 0,
+      x: side < 0 ? -30 : gc.clientWidth + 30,
+      y: clamp(hy + (Math.random() - 0.5) * 120, 60, gc.clientHeight - 26),
+      hx, hy, side, vx: 0, s: n.imp.s, hp: n.imp.hp, hitT: 0,
       drunk: 0, fill: 4 + 3 * n.imp.hp,
-      speed: clamp(Math.hypot(hx - x, hy - y) / Math.max(0.4, n.t - t + 0.15), 70, 460),
+      speed: 70, // set below once the walk distance is known
       phase: Math.random() * 10, variant: Math.floor(Math.random() * 3),
+      color: IMP_COLORS[Math.floor(Math.random() * IMP_COLORS.length)],
       state: 'come', st: 0, blot: null,
     };
+    imp.speed = clamp(Math.hypot(hx - imp.x, hy - imp.y) / Math.max(0.4, n.t - t + 0.15), 70, 460);
     n.escort = imp;
     r.imps.push(imp);
   }
@@ -1630,6 +1656,7 @@ function boot() {
     const d = Math.hypot(imp.x - fx, imp.y - fy) || 1;
     imp.x = clamp(imp.x + (imp.x - fx) / d * 46, 16, gc.clientWidth - 16);
     imp.y = clamp(imp.y + (imp.y - fy) / d * 32, 34, gc.clientHeight - 22);
+    clampMargin(imp); // knockback never shoves them onto the staff
     for (let i = 0; i < 3; i++) r.particles.push({ type: 'drop', x: imp.x, y: imp.y - 10 * imp.s, vx: (Math.random() - 0.5) * 130, vy: -60 - Math.random() * 60, life: 1, red: false });
   }
 
@@ -1735,53 +1762,167 @@ function boot() {
     }
   }
 
+  function circle(x, y, rad, fill, stroke) {
+    gctx.beginPath(); gctx.arc(x, y, rad, 0, Math.PI * 2);
+    if (fill) { gctx.fillStyle = fill; gctx.fill(); }
+    if (stroke) gctx.stroke();
+  }
+
+  // the mascots: plump multicoloured doodle-imps with big eyes
   function drawImp(imp, t) {
-    const wob = Math.sin(t * 7 + imp.phase);
+    const col = imp.color || IMP_COLORS[0];
     if (imp.state === 'splat') {
       const a2 = Math.max(0, 1 - imp.st / 0.7);
-      gctx.globalAlpha = a2 * 0.85;
-      gctx.fillStyle = INK;
+      gctx.globalAlpha = a2 * 0.9;
+      gctx.fillStyle = col;
       for (const b2 of imp.blot) { gctx.beginPath(); gctx.arc(imp.x + b2.dx, imp.y - 8 * imp.s + b2.dy, b2.r, 0, Math.PI * 2); gctx.fill(); }
       gctx.globalAlpha = 1;
       return;
     }
+    const wob = Math.sin(t * 7 + imp.phase);
+    const v = imp.variant;
+    const menace = imp.state === 'menace', flee = imp.state === 'flee';
     const gnawing = imp.state === 'gnaw' && !imp.vx;
-    const hop = imp.state === 'menace' ? Math.abs(Math.sin(imp.st * 9)) * 7
+    const moving = Math.abs(imp.vx || 0) > 1 || imp.state === 'come';
+    const hop = menace ? Math.abs(Math.sin(imp.st * 9)) * 7
       : gnawing ? Math.abs(Math.sin(imp.st * 10)) * 2.5 : 0;
-    const lean = imp.state === 'flee' ? (imp.vx < 0 ? -0.28 : 0.28)
-      : gnawing ? Math.sin(imp.st * 10) * 0.09
-      : clamp((imp.vx || 0) / 220, -0.18, 0.18) + wob * 0.05;
+    const lean = flee ? (imp.vx < 0 ? -0.25 : 0.25)
+      : gnawing ? Math.sin(imp.st * 10) * 0.08
+      : clamp((imp.vx || 0) / 260, -0.16, 0.16) + wob * 0.04;
     gctx.save();
     gctx.translate(imp.x, imp.y - hop * imp.s);
     gctx.scale(imp.s, imp.s);
     gctx.rotate(lean);
-    gctx.strokeStyle = INK; gctx.lineWidth = 1.6;
-    const step = Math.sin(t * (imp.state === 'flee' ? 24 : 11) + imp.phase) * 4;
-    gctx.beginPath(); gctx.moveTo(-3, -6); gctx.lineTo(-3 + step, 0); gctx.moveTo(3, -6); gctx.lineTo(3 - step, 0); gctx.stroke();
-    gctx.beginPath(); gctx.moveTo(-6, -11);
-    gctx.quadraticCurveTo(-14, -13 + wob * 3, -17, -19 + wob * 2);
-    gctx.stroke();
-    gctx.fillStyle = INK;
-    const v = imp.variant;
-    gctx.beginPath();
-    if (v === 1) gctx.ellipse(0, -13, 5.5, 8.5, 0, 0, Math.PI * 2);
-    else gctx.ellipse(0, -12, v === 2 ? 9 : 7.5, 6.5 - wob * 0.3, 0, 0, Math.PI * 2);
-    gctx.fill();
+    gctx.strokeStyle = INK; gctx.lineWidth = 1.5; gctx.lineCap = 'round';
+    // stubby feet, alternating while on the move
+    const step = moving ? Math.sin(t * (flee ? 22 : 13) + imp.phase) * 2.2 : 0;
+    gctx.fillStyle = col;
+    gctx.beginPath(); gctx.ellipse(-4, -1.6 - Math.max(0, step), 2.5, 1.9, 0, 0, Math.PI * 2); gctx.fill(); gctx.stroke();
+    gctx.beginPath(); gctx.ellipse(4, -1.6 - Math.max(0, -step), 2.5, 1.9, 0, 0, Math.PI * 2); gctx.fill(); gctx.stroke();
+    // plump body, breathing softly
+    gctx.beginPath(); gctx.ellipse(0, -11, 8.6 + wob * 0.25, 8.2 - wob * 0.25, 0, 0, Math.PI * 2);
+    gctx.fillStyle = col; gctx.fill(); gctx.stroke();
+    gctx.fillStyle = 'rgba(255,255,255,.3)';
+    gctx.beginPath(); gctx.ellipse(0, -7.6, 4.6, 3.4, 0, 0, Math.PI * 2); gctx.fill();
+    // headgear per variant: nub horns / curly antenna / three crown nubs
+    gctx.fillStyle = col;
+    if (v === 0) { circle(-4.4, -18.6, 1.9, col, true); circle(4.4, -18.6, 1.9, col, true); }
+    else if (v === 1) {
+      gctx.beginPath(); gctx.moveTo(0, -19); gctx.quadraticCurveTo(1.5 + wob, -24, -1 + wob, -25.5); gctx.stroke();
+      circle(-1 + wob, -25.5, 1.7, col, true);
+    } else { circle(-5, -18.2, 1.6, col, true); circle(0, -19.4, 1.6, col, true); circle(5, -18.2, 1.6, col, true); }
+    // arms: the third kind has little crab pincers
     if (v === 2) {
-      for (const dx of [-5, 0, 5]) { gctx.beginPath(); gctx.moveTo(dx - 2, -17); gctx.lineTo(dx, -23); gctx.lineTo(dx + 2, -17); gctx.closePath(); gctx.fill(); }
+      for (const sd of [-1, 1]) {
+        circle(sd * 11.2, -12 + wob * 0.5, 3, col, true);
+        gctx.fillStyle = PAPER;
+        gctx.beginPath(); gctx.moveTo(sd * 11.2, -12 + wob * 0.5);
+        gctx.lineTo(sd * 14.6, -14.4 + wob * 0.5); gctx.lineTo(sd * 14.6, -9.6 + wob * 0.5);
+        gctx.closePath(); gctx.fill();
+        gctx.fillStyle = col;
+      }
     } else {
-      const hl = v === 1 ? 8 : 5;
-      gctx.beginPath(); gctx.moveTo(-4, -18); gctx.lineTo(-6.5, -18 - hl); gctx.lineTo(-1.5, -17); gctx.closePath(); gctx.fill();
-      gctx.beginPath(); gctx.moveTo(4, -18); gctx.lineTo(6.5, -18 - hl); gctx.lineTo(1.5, -17); gctx.closePath(); gctx.fill();
+      const up = menace ? -1 : 1; // arms thrown up while menacing
+      gctx.beginPath(); gctx.moveTo(-8.2, -12); gctx.lineTo(-11, -12 + up * 3.6); gctx.stroke();
+      gctx.beginPath(); gctx.moveTo(8.2, -12); gctx.lineTo(11, -12 + up * 3.6); gctx.stroke();
     }
-    gctx.fillStyle = PAPER;
-    gctx.beginPath(); gctx.arc(-2.6, -13, 1.3, 0, Math.PI * 2); gctx.fill();
-    gctx.beginPath(); gctx.arc(2.6, -13, 1.3, 0, Math.PI * 2); gctx.fill();
+    // face
+    if (gnawing) { // blissful closed eyes while munching
+      gctx.lineWidth = 1.3;
+      gctx.beginPath(); gctx.arc(-3.1, -13.2, 1.8, Math.PI, 0); gctx.stroke();
+      gctx.beginPath(); gctx.arc(3.1, -13.2, 1.8, Math.PI, 0); gctx.stroke();
+    } else {
+      gctx.lineWidth = 1;
+      circle(-3.1, -13, 2.6, '#fff', true);
+      circle(3.1, -13, 2.6, '#fff', true);
+      const px = flee ? (imp.vx < 0 ? -0.9 : 0.9) : clamp((imp.vx || 0) / 200, -0.9, 0.9) + wob * 0.25;
+      const py = menace ? -0.5 : 0.35;
+      circle(-3.1 + px, -13 + py, menace ? 1.4 : 1.15, INK, false);
+      circle(3.1 + px, -13 + py, menace ? 1.4 : 1.15, INK, false);
+    }
+    gctx.fillStyle = 'rgba(224,110,110,.38)';
+    circle(-5.7, -9.8, 1.5, 'rgba(224,110,110,.38)', false);
+    circle(5.7, -9.8, 1.5, 'rgba(224,110,110,.38)', false);
+    // mouth
+    gctx.lineWidth = 1.2; gctx.strokeStyle = INK;
+    if (gnawing) {
+      const open = Math.abs(Math.sin(imp.st * 10)) * 1.6 + 0.5;
+      gctx.beginPath(); gctx.ellipse(0, -8.6, 1.9, open, 0, 0, Math.PI * 2); gctx.fillStyle = INK; gctx.fill();
+    } else if (menace) { // gleeful open grin with one fang
+      gctx.beginPath(); gctx.arc(0, -9.8, 2.3, 0, Math.PI); gctx.fillStyle = INK; gctx.fill();
+      gctx.fillStyle = '#fff';
+      gctx.beginPath(); gctx.moveTo(1, -9.8); gctx.lineTo(2.1, -9.8); gctx.lineTo(1.55, -8.6); gctx.closePath(); gctx.fill();
+    } else if (flee) {
+      gctx.beginPath(); gctx.arc(0, -9.2, 1, 0, Math.PI * 2); gctx.stroke();
+      circle(-8.4, -18, 1.2, 'rgba(120,170,205,.9)', false); // sweat bead
+    } else {
+      gctx.beginPath(); gctx.arc(0, -10.2, 2, Math.PI * 0.15, Math.PI * 0.85); gctx.stroke();
+    }
     if (imp.hitT > 0) {
       gctx.strokeStyle = ACCENT; gctx.lineWidth = 1.2;
-      gctx.beginPath(); gctx.ellipse(0, -12, 12, 11, 0, 0, Math.PI * 2); gctx.stroke();
+      gctx.beginPath(); gctx.ellipse(0, -11, 12, 11, 0, 0, Math.PI * 2); gctx.stroke();
     }
     gctx.restore();
+  }
+
+  // stage curtains sweep in over the page at the end of a run —
+  // a graceful draw on a clear, a slam on a fail
+  function drawCurtains(p, type) {
+    const W = gc.clientWidth, H = gc.clientHeight;
+    const ease = type === 'fail' ? p * p : p * p * (3 - 2 * p);
+    const cw = (W / 2 + 26) * ease;
+    if (cw <= 0) return;
+    const tNow = performance.now() / 1000;
+    for (const sd of [-1, 1]) {
+      gctx.save();
+      if (sd > 0) { gctx.translate(W, 0); gctx.scale(-1, 1); }
+      // panel with a softly scalloped leading edge
+      gctx.beginPath();
+      gctx.moveTo(-26, -4); gctx.lineTo(-26, H + 4);
+      const bulges = Math.max(3, Math.round(H / 150));
+      for (let i = bulges; i >= 0; i--) {
+        const y = (i / bulges) * H;
+        const y2 = ((i - 0.5) / bulges) * H;
+        if (i === bulges) gctx.lineTo(cw - 26, y);
+        else gctx.quadraticCurveTo(cw - 8 + Math.sin(tNow * 2 + i) * 3, y2, cw - 26 + (i % 2) * 8, y);
+      }
+      gctx.closePath();
+      gctx.fillStyle = '#7c2622'; gctx.fill();
+      gctx.save();
+      gctx.clip();
+      gctx.fillStyle = 'rgba(35,15,12,.28)'; // velvet folds
+      for (let x = -18; x < cw; x += 30) {
+        gctx.beginPath();
+        gctx.moveTo(x, -4);
+        gctx.quadraticCurveTo(x + 9 + Math.sin(tNow * 1.7 + x) * 4, H / 2, x, H + 4);
+        gctx.lineTo(x + 12, H + 4);
+        gctx.quadraticCurveTo(x + 21 + Math.sin(tNow * 1.7 + x) * 4, H / 2, x + 12, -4);
+        gctx.closePath(); gctx.fill();
+      }
+      gctx.restore();
+      gctx.strokeStyle = '#c9a04c'; gctx.lineWidth = 2.5; // gold trim
+      gctx.stroke();
+      gctx.restore();
+    }
+    // valance swag across the top
+    gctx.fillStyle = '#5f1c19';
+    gctx.beginPath();
+    gctx.moveTo(0, 0); gctx.lineTo(W, 0);
+    const swags = Math.max(3, Math.round(W / 220));
+    for (let i = swags; i >= 0; i--) gctx.quadraticCurveTo(((i + 0.5) / swags) * W, 46 * Math.min(1, p * 2.5), (i / swags) * W, 16 * Math.min(1, p * 2.5));
+    gctx.closePath(); gctx.fill();
+    // the closing line, once the curtains meet
+    if (p >= 1) {
+      gctx.globalAlpha = 0.95;
+      gctx.fillStyle = PAPER;
+      gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
+      gctx.font = 'italic 600 30px Palatino, "Book Antiqua", Georgia, serif';
+      gctx.fillText(type === 'fail' ? 'the curtain falls…' : 'fine.', W / 2, H * 0.44);
+      gctx.font = 'italic 15px Palatino, "Book Antiqua", Georgia, serif';
+      gctx.fillStyle = '#c9a04c';
+      gctx.fillText(type === 'fail' ? 'the imps take the page' : 'the recital concludes', W / 2, H * 0.44 + 34);
+      gctx.globalAlpha = 1;
+    }
   }
 
   function line(a, b, c, d) { gctx.beginPath(); gctx.moveTo(a, b); gctx.lineTo(c, d); gctx.stroke(); }
