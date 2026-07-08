@@ -27,12 +27,13 @@ Hold notes: press on the head, keep it down until the tail.
   and MIDI (`.mid`/`.midi`) parsed in-browser; charts generated per difficulty
 - **Four difficulties** — Easy through Virtuoso, with hold notes and
   procedurally seeded streams (jacks, trills, rolls) on the top tiers
-- **Marginalia imps ride the chart** — dense streams descend as a visible
-  swarm, every hold note carries a heavyweight, and stray notes hitch a
-  rider. Hit the note and its imp is squashed; miss it and the imp lands on
-  the page and gnaws your ink away until your hits splat it. Knockback, HP,
-  and a Crescendo fever mode at 25 combo that scares them off; score
-  multiplier ladder, milestone shockwaves, full-combo seals
+- **Marginalia imps tuned to the chart** — imps scurry in from the page
+  margins, one per marked note: dense streams send a swarm, every hold
+  sends a heavyweight, stray notes send a lone raider. Each imp lurks below
+  its note's lane and dies only when that note is played; miss the note and
+  it stays to gnaw your ink away until your hits splat it. Knockback, HP,
+  and a Crescendo fever mode at 25 combo; score multiplier ladder,
+  milestone shockwaves, full-combo seals
 - **Normalized scoring** — every chart tops out at exactly 1,000,000, so
   scores are comparable across songs and difficulties
 - **Ink gauge** — misses bleed ink and gnawing imps drain it; hits restore

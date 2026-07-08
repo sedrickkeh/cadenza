@@ -1337,8 +1337,9 @@ function boot() {
     const chart = buildChart(song.events, diff, song.bpmHint);
     if (!chart.length) { toast('That chart came out empty \u2014 try another difficulty.', true); return; }
     const notes = chart.map((n, i) => ({ ...n, i, state: 0 })); // 0 pending, 1 holding, 2 missed, 3 done
-    // imps ride the chart itself: every hold carries a heavyweight, dense
-    // streams carry a swarm, and a few stragglers hitch on anywhere
+    // imps are tuned to the chart: every hold sends a heavyweight, dense
+    // streams send a swarm, and a few other notes send a stray — each one
+    // scurries in from the page edge and only dies when its note is played
     const rideProb = { easy: 5, normal: 10, hard: 14, virtuoso: 18 }[diff] || 10;
     for (const n of notes) {
       if (!n.hold) continue;
@@ -1382,7 +1383,7 @@ function boot() {
       life: 100,
       activeHolds: [null, null, null, null],
       mult: 1, fever: false, milestonesHit: {}, announce: null, shock: null,
-      imps: [], projectiles: [], impsSwatted: 0, impsEscaped: 0,
+      imps: [], projectiles: [], impsSwatted: 0, impsEscaped: 0, impIdx: 0,
       glyphT: 0, lastFrameMs: performance.now(),
     };
     $('pauseMenu').classList.remove('open');
@@ -1430,8 +1431,8 @@ function boot() {
     const ad = Math.abs(d);
     const kind = ad <= JUDGE.perfect ? 'perfect' : ad <= JUDGE.great ? 'great' : 'good';
     if (best.hold) { best.state = 1; r.activeHolds[lane] = best; }
-    else { best.state = 3; if (best.imp) squashRider(best, lane); }
-    registerHit(kind, lane, d);
+    else best.state = 3;
+    registerHit(kind, lane, d, best.hold ? null : best); // hold escorts die at the tail
   }
 
   const LIFE_REGEN = { perfect: 0.8, great: 0.5, good: 0.2 };
@@ -1446,7 +1447,7 @@ function boot() {
     if (r.life <= 0) r.failed = true; // gameFrame ends the run at the frame boundary
   }
 
-  function registerHit(kind, lane, off) {
+  function registerHit(kind, lane, off, note) {
     const r = G.run;
     r.counts[kind]++;
     r.judged++;
@@ -1470,7 +1471,7 @@ function boot() {
     r.pops.push({ t: performance.now(), kind, lane, off });
     const w = playW(), lw = w / 4, x0 = (gc.clientWidth - w) / 2;
     spawnInk(x0 + lane * lw + lw / 2, hitY(), kind);
-    fireProjectile(x0 + lane * lw + lw / 2, kind);
+    if (!killEscort(note)) fireProjectile(x0 + lane * lw + lw / 2, kind);
   }
 
   function releaseLane(lane) {
@@ -1480,14 +1481,14 @@ function boot() {
     if (!h) return;
     r.activeHolds[lane] = null;
     const t = pos();
-    if (t >= h.tailT - 0.15) { h.state = 3; if (h.imp) squashRider(h, lane); registerHit('perfect', lane, 0); }
+    if (t >= h.tailT - 0.15) { h.state = 3; registerHit('perfect', lane, 0, h); }
     else {
       h.state = 2;
       r.judged++; r.counts.miss++;
       r.combo = 0; r.mult = 1; r.fever = false;
       drainLife(13);
       r.pops.push({ t: performance.now(), kind: 'drop', lane, off: 0 });
-      if (h.imp) spawnLooseImp(lane, h.imp); // the heavyweight jumps off onto the page
+      startGnaw(h.escort); // the heavyweight settles in to feed
     }
   }
 
@@ -1539,7 +1540,7 @@ function boot() {
             r.counts.miss += units; r.judged += units;
             r.combo = 0; r.mult = 1; r.fever = false;
             drainLife(13);
-            if (n.imp) spawnLooseImp(l, n.imp); // its rider lands and starts gnawing
+            startGnaw(n.escort); // its imp stays and starts gnawing
             r.pops.push({ t: performance.now(), kind: 'miss', lane: l, off: 0 });
             r.lanePtr[l]++;
           } else if (n.state !== 0) {
@@ -1550,7 +1551,7 @@ function boot() {
 
       for (let l = 0; l < 4; l++) {
         const h = r.activeHolds[l];
-        if (h && t > h.tailT) { r.activeHolds[l] = null; h.state = 3; if (h.imp) squashRider(h, l); registerHit('perfect', l, 0); }
+        if (h && t > h.tailT) { r.activeHolds[l] = null; h.state = 3; registerHit('perfect', l, 0, h); }
       }
 
       updateImps(dtR, t);
@@ -1571,30 +1572,43 @@ function boot() {
     return (gc.clientWidth - w) / 2 + lane * lw + lw / 2;
   }
 
-  // a missed note's rider lands on the page below its lane and gnaws
-  // at the paper, bleeding ink until it is splatted or has eaten its fill
-  function spawnLooseImp(lane, rider) {
-    const r = G.run; if (!r) return;
-    if (r.imps.filter(i => i.state === 'gnaw').length >= 14) return;
-    const x = clamp(laneX(lane) + (Math.random() - 0.5) * 36, 20, gc.clientWidth - 20);
-    const y = hitY() + 34 + Math.random() * 22;
-    r.imps.push({
-      x, y, hx: x, hy: y, vx: 0, s: rider.s + 0.4, hp: rider.hp, hitT: 0,
-      drunk: 0, fill: 4 + 3 * rider.hp,
+  // each marked note sends an escort imp in from the page edge, timed to
+  // arrive below its lane just as the note reaches the barline
+  function spawnEscort(n, t) {
+    const r = G.run;
+    if (r.imps.filter(i => i.state === 'come' || i.state === 'menace').length >= 16) return;
+    const W = gc.clientWidth;
+    const fromLeft = (n.lane < 2) !== (Math.random() < 0.2);
+    const x = fromLeft ? -30 : W + 30;
+    const y = clamp(hitY() * (0.45 + Math.random() * 0.4) + Math.random() * 60, 60, gc.clientHeight - 26);
+    const hx = clamp(laneX(n.lane) + (Math.random() - 0.5) * 44, 20, W - 20);
+    const hy = hitY() + 30 + Math.random() * 26;
+    const imp = {
+      x, y, hx, hy, vx: 0, s: n.imp.s, hp: n.imp.hp, hitT: 0,
+      drunk: 0, fill: 4 + 3 * n.imp.hp,
+      speed: clamp(Math.hypot(hx - x, hy - y) / Math.max(0.4, n.t - t + 0.15), 70, 460),
       phase: Math.random() * 10, variant: Math.floor(Math.random() * 3),
-      state: 'gnaw', st: 0, blot: null,
-    });
+      state: 'come', st: 0, blot: null,
+    };
+    n.escort = imp;
+    r.imps.push(imp);
   }
 
-  // a rider whose note was hit gets squashed on the spot
-  function squashRider(n, lane) {
+  // playing the note dispatches its escort: a glyph flies out and splats it
+  function killEscort(n) {
     const r = G.run;
-    const imp = {
-      x: laneX(lane), y: hitY() + 6, s: n.imp.s, hp: 0, hitT: 0,
-      drunk: 0, phase: 0, variant: 0, state: 'gnaw', st: 0, blot: null,
-    };
-    r.imps.push(imp);
-    splatImp(imp);
+    const imp = n && n.escort;
+    if (!imp || imp.state === 'splat' || imp.state === 'gone' || imp.doomed) return false;
+    imp.doomed = true;
+    r.projectiles.push({ x: laneX(n.lane), y: hitY() + 6, target: imp, sure: true, red: imp.s > 2, rot: Math.random() * 6 });
+    return true;
+  }
+
+  // a missed note's escort stays and gnaws the page, bleeding ink
+  // until it is splatted or has eaten its fill
+  function startGnaw(imp) {
+    if (!imp || (imp.state !== 'come' && imp.state !== 'menace')) return;
+    imp.state = 'gnaw'; imp.st = 0;
   }
 
   function splatImp(imp) {
@@ -1623,7 +1637,7 @@ function boot() {
     const r = G.run;
     let best = null, bd = 1e9;
     for (const imp of r.imps) {
-      if (imp.state !== 'gnaw') continue;
+      if (imp.state !== 'gnaw' || imp.doomed) continue;
       const d = Math.abs(imp.x - fromX);
       if (d < bd) { bd = d; best = imp; }
     }
@@ -1634,11 +1648,24 @@ function boot() {
   function updateImps(dt, t) {
     const r = G.run;
     const W = gc.clientWidth, H = gc.clientHeight;
+    // send in escorts for notes entering the approach window
+    while (r.impIdx < r.notes.length && r.notes[r.impIdx].t - t <= 2.2) {
+      const n = r.notes[r.impIdx++];
+      if (n.imp && !r.done) spawnEscort(n, t);
+    }
     for (let i = r.imps.length - 1; i >= 0; i--) {
       const imp = r.imps[i];
       imp.st += dt;
       if (imp.hitT > 0) imp.hitT -= dt;
-      if (imp.state === 'gnaw') {
+      if (imp.state === 'come') {
+        const d = Math.hypot(imp.hx - imp.x, imp.hy - imp.y) || 1;
+        imp.vx = (imp.hx - imp.x) / d * imp.speed;
+        imp.x += imp.vx * dt;
+        imp.y += (imp.hy - imp.y) / d * imp.speed * dt;
+        if (d < 8) { imp.state = 'menace'; imp.st = 0; imp.vx = 0; }
+      } else if (imp.state === 'menace') {
+        // hops in place below its note's lane, waiting for the verdict
+      } else if (imp.state === 'gnaw') {
         const d = Math.hypot(imp.hx - imp.x, imp.hy - imp.y);
         if (d > 6) { // scurries back to its gnawing spot after a knockback
           imp.vx = (imp.hx - imp.x) / d * 140;
@@ -1665,9 +1692,10 @@ function boot() {
     for (let i = r.projectiles.length - 1; i >= 0; i--) {
       const p = r.projectiles[i];
       if (!p.target || p.target.state === 'splat' || p.target.state === 'gone') {
+        if (p.sure) { r.projectiles.splice(i, 1); continue; } // its escort is already gone
         let best = null, bd = 1e9;
         for (const imp of r.imps) {
-          if (imp.state === 'splat' || imp.state === 'gone') continue;
+          if (imp.state !== 'gnaw' || imp.doomed) continue;
           const d = Math.hypot(imp.x - p.x, imp.y - p.y);
           if (d < bd) { bd = d; best = imp; }
         }
@@ -1680,7 +1708,8 @@ function boot() {
       p.rot += dt * 9;
       if (d <= step + 14) {
         const hx = tx, hly = ty;
-        damageImp(p.target, p.x, p.y);
+        if (p.sure) splatImp(p.target); // its note was played — it goes
+        else damageImp(p.target, p.x, p.y);
         if (p.red) for (const imp of r.imps) {
           if (imp.state === 'gnaw' && Math.hypot(imp.x - hx, imp.y - hly) < 84 && imp !== p.target) damageImp(imp, hx, hly);
         }
@@ -1717,10 +1746,10 @@ function boot() {
       return;
     }
     const gnawing = imp.state === 'gnaw' && !imp.vx;
-    const hop = gnawing ? Math.abs(Math.sin(imp.st * 10)) * 2.5 : 0;
+    const hop = imp.state === 'menace' ? Math.abs(Math.sin(imp.st * 9)) * 7
+      : gnawing ? Math.abs(Math.sin(imp.st * 10)) * 2.5 : 0;
     const lean = imp.state === 'flee' ? (imp.vx < 0 ? -0.28 : 0.28)
       : gnawing ? Math.sin(imp.st * 10) * 0.09
-      : imp.state === 'ride' ? wob * 0.1
       : clamp((imp.vx || 0) / 220, -0.18, 0.18) + wob * 0.05;
     gctx.save();
     gctx.translate(imp.x, imp.y - hop * imp.s);
@@ -1753,14 +1782,6 @@ function boot() {
       gctx.beginPath(); gctx.ellipse(0, -12, 12, 11, 0, 0, Math.PI * 2); gctx.stroke();
     }
     gctx.restore();
-  }
-
-  // an imp perched on a falling notehead
-  function drawRider(x, y, def, t, seed) {
-    drawImp({
-      x, y: y - 5, s: def.s, hp: def.hp, hitT: 0, vx: 0, drunk: 0,
-      st: t, phase: seed * 1.7, variant: seed % 3, state: 'ride', blot: null,
-    }, t);
   }
 
   function line(a, b, c, d) { gctx.beginPath(); gctx.moveTo(a, b); gctx.lineTo(c, d); gctx.stroke(); }
@@ -1895,7 +1916,6 @@ function boot() {
         // head: half-note style
         if (dead) { gctx.globalAlpha = 0.3; notehead(cx, headY, 'holdHead'); gctx.globalAlpha = 1; }
         else notehead(cx, headY, holding ? 'holdActive' : 'holdHead');
-        if (n.imp && !dead) drawRider(cx, headY, n.imp, holding ? t * 2.5 : t, n.i); // wriggles harder while pinned
         if (holding && Math.random() < 0.3) {
           r.particles.push({ type: 'drop', x: cx + (Math.random() - 0.5) * 16, y: hy - 6, vx: (Math.random() - 0.5) * 40, vy: -70 - Math.random() * 50, life: 0.7, red: true });
         }
@@ -1908,7 +1928,6 @@ function boot() {
           gctx.globalAlpha = 1;
         } else {
           notehead(cx, y, 'fill');
-          if (n.imp) drawRider(cx, y, n.imp, t, n.i);
         }
       }
     }
@@ -2060,7 +2079,7 @@ function boot() {
       const h = r.activeHolds[l];
       if (h) {
         r.activeHolds[l] = null; h.state = 3;
-        if (h.imp) { r.impsSwatted++; h.imp = null; }
+        if (h.escort && h.escort.state !== 'splat' && h.escort.state !== 'gone') { r.impsSwatted++; h.escort.state = 'gone'; }
         r.judged++; r.weightSum += 1; r.counts.perfect++;
         r.combo++; if (r.combo > r.maxCombo) r.maxCombo = r.combo;
         r.mult = multFor(r.combo);
