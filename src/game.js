@@ -952,7 +952,9 @@ const Sound = {
 
   setVolume(v) { this.volume = v; if (this.master) this.master.gain.value = v; },
 
-  // celesta / music-box tone
+  // celesta / music-box tone — a warm sub-octave for body, slightly
+  // inharmonic uppers whose brightness follows velocity, and each note
+  // placed in the stereo field by pitch like a real instrument
   playTone(midi, when, dur, vel = 0.8) {
     if (!this.ctx || this.voices > this.maxVoices) return;
     const f = midiToFreq(midi);
@@ -962,8 +964,12 @@ const Sound = {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.16 * vel, t + 0.006);
     g.gain.exponentialRampToValueAtTime(0.0008, t + decay);
-    g.connect(this.mix);
-    const partials = [[1, 1], [2.001, 0.35], [3.003, 0.12]];
+    if (this.ctx.createStereoPanner) {
+      const pan = this.ctx.createStereoPanner();
+      pan.pan.value = clamp((midi - 64) / 44, -0.45, 0.45);
+      g.connect(pan); pan.connect(this.mix);
+    } else g.connect(this.mix);
+    const partials = [[1, 1], [0.5, 0.16], [2.001, 0.18 + 0.24 * vel], [3.003, 0.03 + 0.12 * vel]];
     for (const [mult, amp] of partials) {
       const o = this.ctx.createOscillator();
       o.type = 'sine';
@@ -978,7 +984,7 @@ const Sound = {
     if (this.sources.length > 400) this.sources = this.sources.filter(s => { try { return s.context; } catch (e) { return false; } }).slice(-300);
   },
 
-  hitTick() {
+  hitTick(pan = 0) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     const len = 0.02;
@@ -988,11 +994,30 @@ const Sound = {
     const src = this.ctx.createBufferSource(); src.buffer = buf;
     const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 1.2;
     const g = this.ctx.createGain(); g.gain.value = 0.07;
-    src.connect(bp); bp.connect(g); g.connect(this.comp);
+    src.connect(bp); bp.connect(g);
+    if (pan && this.ctx.createStereoPanner) {
+      const p = this.ctx.createStereoPanner(); p.pan.value = pan;
+      g.connect(p); p.connect(this.comp);
+    } else g.connect(this.comp);
     src.start(t);
   },
 
   countTick(hi) { this.playTone(hi ? 76 : 69, this.ctx ? this.ctx.currentTime : 0, 0.18, 0.5); },
+
+  uiClick() { this.playTone(91, this.ctx ? this.ctx.currentTime : 0, 0.06, 0.22); },
+
+  // a small arpeggiated flourish for the results page, voiced by grade
+  fanfare(grade) {
+    if (!this.ctx) return;
+    const arps = {
+      SS: [60, 67, 72, 76, 79, 84], S: [60, 67, 72, 76, 79],
+      A: [60, 67, 72, 76], B: [60, 67, 72, 75],
+      C: [60, 66, 72], D: [60, 65, 70],
+    };
+    const seq = arps[grade] || arps.D;
+    const now = this.ctx.currentTime;
+    seq.forEach((m, i) => this.playTone(m, now + 0.3 + i * 0.085, 0.9, 0.5));
+  },
 
   stopAll() {
     for (const s of this.sources) { try { s.stop(); } catch (e) {} }
@@ -1034,7 +1059,7 @@ const G = {
   screen: 'title',
   songs: [],          // {id, title, composer, events, bpmHint, custom, meta}
   scores: {},         // `${songId}|${diff}` -> {score, acc, grade, combo}
-  settings: { speed: 5, volume: 0.85, hitSound: true },
+  settings: { speed: 5, volume: 0.85, hitSound: true, offset: 0 },
   run: null,          // active gameplay state
 };
 
@@ -1324,18 +1349,21 @@ function boot() {
   });
 
   /* ---------- settings ---------- */
-  const speedIn = $('speedRange'), volIn = $('volRange'), hitIn = $('hitToggle');
+  const speedIn = $('speedRange'), volIn = $('volRange'), hitIn = $('hitToggle'), offIn = $('offsetRange');
   function applySettings() {
     speedIn.value = G.settings.speed;
     volIn.value = Math.round(G.settings.volume * 100);
     hitIn.checked = G.settings.hitSound;
+    offIn.value = G.settings.offset || 0;
     $('speedVal').textContent = G.settings.speed;
+    $('offsetVal').textContent = (G.settings.offset > 0 ? '+' : '') + (G.settings.offset || 0) + 'ms';
     Sound.setVolume(G.settings.volume);
   }
   async function saveSettings() { await store.set('cadenza:settings', G.settings); }
   speedIn.addEventListener('input', () => { G.settings.speed = +speedIn.value; $('speedVal').textContent = speedIn.value; saveSettings(); });
   volIn.addEventListener('input', () => { G.settings.volume = volIn.value / 100; Sound.setVolume(G.settings.volume); saveSettings(); });
   hitIn.addEventListener('change', () => { G.settings.hitSound = hitIn.checked; saveSettings(); });
+  offIn.addEventListener('input', () => { G.settings.offset = +offIn.value; $('offsetVal').textContent = (G.settings.offset > 0 ? '+' : '') + G.settings.offset + 'ms'; saveSettings(); });
 
   /* ---------- gameplay ---------- */
   const gc = $('gameCanvas');
@@ -1391,7 +1419,7 @@ function boot() {
       held: [false, false, false, false],
       earlyLate: { early: 0, late: 0 },
       paused: false, done: false, failed: false, base: 1000000 / maxWeighted,
-      life: 100,
+      life: 100, dispScore: 0, hurtT: 0,
       activeHolds: [null, null, null, null],
       mult: 1, fever: false, milestonesHit: {}, announce: null, shock: null,
       imps: [], projectiles: [], impsSwatted: 0, impsEscaped: 0, impIdx: 0,
@@ -1408,11 +1436,24 @@ function boot() {
     raf = requestAnimationFrame(gameFrame);
   }
 
+  let vignetteC = null;
   function sizeGame() {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     gc.width = gc.clientWidth * dpr;
     gc.height = gc.clientHeight * dpr;
     gctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    try { // pre-render the red vignette layer used for hurt / low-ink feedback
+      vignetteC = document.createElement('canvas');
+      vignetteC.width = Math.max(2, gc.clientWidth); vignetteC.height = Math.max(2, gc.clientHeight);
+      const c = vignetteC.getContext('2d');
+      const grad = c.createRadialGradient(
+        vignetteC.width / 2, vignetteC.height / 2, Math.min(vignetteC.width, vignetteC.height) * 0.34,
+        vignetteC.width / 2, vignetteC.height / 2, Math.max(vignetteC.width, vignetteC.height) * 0.72);
+      grad.addColorStop(0, 'rgba(168,53,42,0)');
+      grad.addColorStop(1, 'rgba(140,30,24,0.9)');
+      c.fillStyle = grad;
+      c.fillRect(0, 0, vignetteC.width, vignetteC.height);
+    } catch (e) { vignetteC = null; }
   }
   window.addEventListener('resize', () => { if (G.screen === 'game') sizeGame(); });
 
@@ -1421,12 +1462,15 @@ function boot() {
     return Sound.ctx.currentTime - r.startCtxTime;
   }
 
+  // judgement clock: audio time shifted by the player's latency offset
+  function posJ() { return pos() - (G.settings.offset || 0) / 1000; }
+
   function judge(lane) {
     const r = G.run;
     if (!r || r.paused || r.done) return;
-    const t = pos();
+    const t = posJ();
     r.flashes[lane] = 1;
-    if (G.settings.hitSound) Sound.hitTick();
+    if (G.settings.hitSound) Sound.hitTick((lane - 1.5) * 0.28);
     const q = r.laneQ[lane];
     let best = null, bestAbs = Infinity;
     for (let i = r.lanePtr[lane]; i < q.length; i++) {
@@ -1491,13 +1535,13 @@ function boot() {
     const h = r.activeHolds[lane];
     if (!h) return;
     r.activeHolds[lane] = null;
-    const t = pos();
+    const t = posJ();
     if (t >= h.tailT - 0.15) { h.state = 3; registerHit('perfect', lane, 0, h); }
     else {
       h.state = 2;
       r.judged++; r.counts.miss++;
       r.combo = 0; r.mult = 1; r.fever = false;
-      drainLife(13);
+      drainLife(13); r.hurtT = 1;
       r.pops.push({ t: performance.now(), kind: 'drop', lane, off: 0 });
       startGnaw(h.escort); // the heavyweight settles in to feed
     }
@@ -1525,6 +1569,7 @@ function boot() {
     r.lastFrameMs = nowMs;
     if (!r.paused) {
       const t = pos();
+      const tj = posJ(); // judgement clock (latency offset applied)
 
       // countdown ticks
       if (t < 0) {
@@ -1545,12 +1590,12 @@ function boot() {
         const q = r.laneQ[l];
         while (r.lanePtr[l] < q.length) {
           const n = q[r.lanePtr[l]];
-          if (n.state === 0 && t - n.t > JUDGE.good) {
+          if (n.state === 0 && tj - n.t > JUDGE.good) {
             n.state = 2;
             const units = n.hold ? 2 : 1;
             r.counts.miss += units; r.judged += units;
             r.combo = 0; r.mult = 1; r.fever = false;
-            drainLife(13);
+            drainLife(13); r.hurtT = 1;
             startGnaw(n.escort); // its imp stays and starts gnawing
             r.pops.push({ t: performance.now(), kind: 'miss', lane: l, off: 0 });
             r.lanePtr[l]++;
@@ -1562,7 +1607,7 @@ function boot() {
 
       for (let l = 0; l < 4; l++) {
         const h = r.activeHolds[l];
-        if (h && t > h.tailT) { r.activeHolds[l] = null; h.state = 3; registerHit('perfect', l, 0, h); }
+        if (h && tj > h.tailT) { r.activeHolds[l] = null; h.state = 3; registerHit('perfect', l, 0, h); }
       }
 
       updateImps(dtR, t);
@@ -1580,6 +1625,22 @@ function boot() {
       if (r.outro) {
         drawCurtains(Math.min(1, (performance.now() - r.outro.t0) / r.outro.dur), r.outro.type);
         if (performance.now() - r.outro.t0 > r.outro.dur + 700) { finishGame(); return; }
+      }
+    } else if (r.resuming) {
+      // resume count-in over the frozen page (audio clock is still suspended)
+      const left = 1.5 - (performance.now() - r.resuming) / 1000;
+      if (left <= 0) {
+        r.resuming = null; r.paused = false;
+        Sound.ctx.resume();
+        Sound.countTick(true);
+      } else {
+        drawGame(pos());
+        gctx.fillStyle = 'rgba(242,236,221,0.55)';
+        gctx.fillRect(0, 0, gc.clientWidth, gc.clientHeight);
+        gctx.fillStyle = INK;
+        gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
+        gctx.font = '600 76px Palatino, "Book Antiqua", Georgia, serif';
+        gctx.fillText(Math.ceil(left * 2), gc.clientWidth / 2, gc.clientHeight * 0.4);
       }
     }
     raf = requestAnimationFrame(gameFrame);
@@ -1613,7 +1674,7 @@ function boot() {
     if (r.imps.filter(i => i.state === 'come' || i.state === 'menace').length >= 16) return;
     const side = n.lane < 2 ? -1 : 1; // outer lanes' side of the page
     const wall = marginWall(side);
-    const hx = clamp(wall - side * Math.random() * 60, 10, gc.clientWidth - 10);
+    const hx = clamp(wall + side * Math.random() * 60, 10, gc.clientWidth - 10); // outward, into the margin
     const hy = clamp(hitY() - 26 + Math.random() * 70, 60, gc.clientHeight - 26);
     const imp = {
       x: side < 0 ? -30 : gc.clientWidth + 30,
@@ -2008,11 +2069,14 @@ function boot() {
     gctx.lineWidth = 5;   line(x0 - 12, hy + 21, x0 + w + 12, hy + 21);
     gctx.lineWidth = 1;
 
-    // receptors + key labels
+    // receptors + key labels, breathing with the beat
+    const beat = t >= 0 ? 1 - ((t / spb) % 1) : 0;
     gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
     for (let l = 0; l < 4; l++) {
       const cx = x0 + l * lw + lw / 2;
+      gctx.globalAlpha = 0.72 + 0.28 * beat;
       notehead(cx, hy, r.held[l] ? 'pressed' : 'receptor');
+      gctx.globalAlpha = 1;
       gctx.fillStyle = inkA(0.35);
       gctx.font = '12px Palatino, "Book Antiqua", Georgia, serif';
       gctx.fillText(LANE_KEYS[l].toUpperCase(), cx, hy + 42);
@@ -2161,6 +2225,16 @@ function boot() {
       }
     }
 
+    // hurt flash + low-ink warning, bled in at the page edges
+    if (r.hurtT > 0) r.hurtT = Math.max(0, r.hurtT - dtf * 2);
+    const danger = r.life <= 30 ? (30 - r.life) / 30 : 0;
+    const vig = Math.min(0.55, r.hurtT * 0.5 + danger * (0.16 + 0.08 * Math.abs(Math.sin(performance.now() / 280))));
+    if (vig > 0.01 && vignetteC) {
+      gctx.globalAlpha = vig;
+      gctx.drawImage(vignetteC, 0, 0, W, H);
+      gctx.globalAlpha = 1;
+    }
+
     // countdown — printed page wash
     if (t < 0) {
       gctx.fillStyle = 'rgba(242,236,221,0.6)';
@@ -2173,9 +2247,12 @@ function boot() {
       gctx.fillText(r.song.title, W / 2, H * 0.4 + 58);
     }
 
-    // HUD
+    // HUD — score rolls up rather than jumping
     const acc = r.judged ? r.weightSum / r.judged : 1;
-    $('gScore').textContent = String(Math.min(1000000, Math.round(r.score))).padStart(7, '0');
+    const target = Math.min(1000000, r.score);
+    r.dispScore = r.dispScore + (target - r.dispScore) * 0.16;
+    if (target - r.dispScore < 1) r.dispScore = target;
+    $('gScore').textContent = String(Math.round(r.dispScore)).padStart(7, '0');
     $('gAcc').textContent = (acc * 100).toFixed(2) + '%';
     const prog = clamp(t / r.endT, 0, 1);
     $('gProgress').style.width = (prog * 100) + '%';
@@ -2200,10 +2277,16 @@ function boot() {
   /* ---------- pause ---------- */
   function togglePause() {
     const r = G.run;
-    if (!r || r.done) return;
-    r.paused = !r.paused;
-    $('pauseMenu').classList.toggle('open', r.paused);
-    if (r.paused) Sound.ctx.suspend(); else Sound.ctx.resume();
+    if (!r || r.done || r.resuming) return;
+    if (!r.paused) {
+      r.paused = true;
+      $('pauseMenu').classList.add('open');
+      Sound.ctx.suspend();
+    } else {
+      // don't drop the player straight back into traffic: count them in
+      $('pauseMenu').classList.remove('open');
+      r.resuming = performance.now();
+    }
   }
   $('pauseBtn').addEventListener('click', togglePause);
   $('resumeBtn').addEventListener('click', togglePause);
@@ -2252,7 +2335,7 @@ function boot() {
     $('rGrade').className = 'grade-' + grade;
     $('rFlavor').textContent = flavor;
     $('rSong').textContent = r.song.title + ' \u2014 ' + DIFF_CONFIG[r.diff].label;
-    $('rScore').textContent = String(score).padStart(7, '0');
+    $('rScore').textContent = '0000000'; // rolls up once the page is shown
     $('rAcc').textContent = (acc * 100).toFixed(2) + '%';
     $('rCombo').textContent = r.maxCombo + 'x';
     $('rPerfect').textContent = r.counts.perfect;
@@ -2276,6 +2359,14 @@ function boot() {
     if (raf) cancelAnimationFrame(raf);
     raf = null;
     show('results');
+    if (!r.failed) Sound.fanfare(grade);
+    const rollFrom = performance.now();
+    (function rollScore() {
+      const p = Math.min(1, (performance.now() - rollFrom) / 900);
+      const e2 = 1 - Math.pow(1 - p, 3);
+      $('rScore').textContent = String(Math.round(score * e2)).padStart(7, '0');
+      if (p < 1 && G.screen === 'results') requestAnimationFrame(rollScore);
+    })();
   }
   $('rRetry').addEventListener('click', () => { const r = G.run; startGame(r.song, r.diff); });
   $('rBack').addEventListener('click', () => { G.run = null; show('select'); renderSongs(); });
@@ -2331,6 +2422,11 @@ function boot() {
   window.addEventListener('touchstart', unlockAudio, { passive: true });
   window.addEventListener('pointerdown', unlockAudio);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) unlockAudio(); });
+
+  // a soft celesta blip on interactive elements
+  document.addEventListener('click', e => {
+    if (e.target.closest && e.target.closest('.btn, .diffRow, .progRow, .suiteHead, #pauseBtn')) Sound.uiClick();
+  });
   let mouseLane = -1;
   gc.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && G.run) {

@@ -15,8 +15,13 @@ The whole game is a single dependency-free HTML file.
 Open `index.html` in a browser — or enable GitHub Pages on this repo
 (Settings → Pages → deploy from branch, root) and play at your Pages URL.
 
-**Controls:** `D` `F` `J` `K` or arrow keys. Tap lanes on touch. `Esc` pauses.
-Hold notes: press on the head, keep it down until the tail.
+**Controls:** `D` `F` `J` `K` or arrow keys. Tap lanes on touch. `Esc` pauses
+(resuming counts you back in). Hold notes: press on the head, keep it down
+until the tail.
+
+Settings (on the programme page) cover scroll speed, volume, hit sounds, and
+a **timing offset** to calibrate away your device's audio latency — if your
+results page says you tend to hit late, try a positive offset.
 
 ## Features
 
