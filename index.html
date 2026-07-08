@@ -1725,7 +1725,7 @@ function boot() {
     r.fever = r.combo >= 25;
     if (r.fever && !wasFever) {
       r.announce = { text: 'Crescendo!', t: performance.now() };
-      for (const imp of r.imps) if (imp.state === 'walk') imp.state = 'flee';
+      for (const imp of r.imps) if (imp.state === 'walk' || imp.state === 'drink') imp.state = 'flee';
     }
     if (MILESTONES.includes(r.combo) && !r.milestonesHit[r.combo]) {
       r.milestonesHit[r.combo] = 1;
@@ -1833,7 +1833,7 @@ function boot() {
 
   function spawnImp(force) {
     const r = G.run; if (!r) return;
-    const active = r.imps.filter(i => i.state === 'walk' || i.state === 'taunt').length;
+    const active = r.imps.filter(i => i.state === 'walk' || i.state === 'drink').length;
     if (active >= (force ? 15 : 12)) return;
     const W = gc.clientWidth, H = gc.clientHeight;
     const hy = hitY();
@@ -1847,7 +1847,7 @@ function boot() {
     const spdF = { easy: 0.85, normal: 1, hard: 1.2, virtuoso: 1.35 }[r.diff] || 1;
     r.imps.push({
       x, y, tx: x, ty: y, wpT: 0, vx: 0, s, hp, hitT: 0,
-      val: 300 + 200 * hp,
+      drunk: 0,
       speed: (46 + Math.random() * 26) * spdF,
       phase: Math.random() * 10, variant: Math.floor(Math.random() * 3),
       state: 'walk', st: 0, blot: null,
@@ -1860,7 +1860,7 @@ function boot() {
     imp.state = 'splat'; imp.st = 0;
     imp.blot = [];
     for (let i = 0; i < 6; i++) imp.blot.push({ dx: (Math.random() - 0.5) * 26 * imp.s, dy: (Math.random() - 0.5) * 16 * imp.s, r: (2 + Math.random() * 5) * imp.s });
-    healLife(2); r.impsSwatted++;
+    healLife(2 + imp.drunk * 0.6); r.impsSwatted++; // splashes back most of what it stole
     r.pops.push({ t: performance.now(), kind: 'swat', lane: -1, x: imp.x, y: imp.y - 30 * imp.s, off: 0 });
   }
 
@@ -1870,6 +1870,7 @@ function boot() {
     imp.hp--;
     if (imp.hp <= 0) { splatImp(imp); return; }
     imp.hitT = 0.3;
+    if (imp.state === 'drink') imp.state = 'walk'; // knocked off the well
     const d = Math.hypot(imp.x - fx, imp.y - fy) || 1;
     imp.x = clamp(imp.x + (imp.x - fx) / d * 46, 16, gc.clientWidth - 16);
     imp.y = clamp(imp.y + (imp.y - fy) / d * 32, 34, gc.clientHeight - 22);
@@ -1881,18 +1882,23 @@ function boot() {
     const r = G.run;
     let best = null, bd = 1e9;
     for (const imp of r.imps) {
-      if (imp.state !== 'walk' && imp.state !== 'taunt') continue;
-      const d = Math.abs(imp.x - laneX);
+      if (imp.state !== 'walk' && imp.state !== 'drink') continue;
+      const d = Math.abs(imp.x - laneX) * (imp.state === 'drink' ? 0.4 : 1); // drinkers first
       if (d < bd) { bd = d; best = imp; }
     }
     if (!best) return;
     r.projectiles.push({ x: laneX, y: hitY() + 6, target: best, red: kind === 'perfect', rot: Math.random() * 6 });
   }
 
+  function wellPos() { return { x: gc.clientWidth / 2 - 46, y: gc.clientHeight - 14 }; }
+  const IMP_FILL = 9;          // ink an imp drinks before it scampers off sated
+  const DRINK_SLOTS = [-14, 14, -26, 26]; // latch offsets around the well rim
+
   function updateImps(dt, t) {
     const r = G.run;
     const W = gc.clientWidth, H = gc.clientHeight;
-    const px = W / 2, py = H - 28;
+    const well = wellPos();
+    const px = well.x, py = well.y - 8;
     if (t > 1 && !r.done) {
       r.impSpawnT -= dt * (r.fever ? 0.35 : 1);
       if (r.impSpawnT <= 0) {
@@ -1916,9 +1922,26 @@ function boot() {
         imp.vx = (imp.tx - imp.x) / d * imp.speed;
         imp.x += imp.vx * dt;
         imp.y += (imp.ty - imp.y) / d * imp.speed * dt;
-        if (Math.hypot(imp.x - px, imp.y - py) < 66) { imp.state = 'taunt'; imp.st = 0; }
-      } else if (imp.state === 'taunt') {
-        if (imp.st > 1.2) { imp.state = 'gone'; r.impsEscaped++; drainLife(5); }
+        if (Math.hypot(imp.x - px, imp.y - py) < 54) {
+          const drinkers = r.imps.filter(o => o.state === 'drink').length;
+          if (drinkers < DRINK_SLOTS.length) {
+            imp.state = 'drink'; imp.st = 0;
+            imp.lx = px + DRINK_SLOTS[drinkers]; imp.ly = py + 4;
+          }
+          // no free spot at the well: keep milling around it hungrily
+        }
+      } else if (imp.state === 'drink') {
+        const ease = Math.min(1, dt * 5);
+        imp.x += (imp.lx - imp.x) * ease;
+        imp.y += (imp.ly - imp.y) * ease;
+        const sip = (2 + imp.hp) * dt; // fatter imps gulp faster
+        imp.drunk += sip;
+        drainLife(sip);
+        if (Math.random() < dt * 6) r.particles.push({
+          type: 'drop', x: imp.x + (Math.random() - 0.5) * 8, y: imp.y - 14 * imp.s,
+          vx: (Math.random() - 0.5) * 40, vy: -30 - Math.random() * 40, life: 1, red: true,
+        });
+        if (imp.drunk >= IMP_FILL) { imp.state = 'flee'; r.impsEscaped++; }
       } else if (imp.state === 'flee') {
         imp.vx = (imp.x < px ? -1 : 1) * imp.speed * 3.4;
         imp.x += imp.vx * dt;
@@ -1932,7 +1955,7 @@ function boot() {
         let best = null, bd = 1e9;
         for (const imp of r.imps) {
           if (imp.state === 'splat' || imp.state === 'gone') continue;
-          const d = Math.hypot(imp.x - p.x, imp.y - p.y);
+          const d = Math.hypot(imp.x - p.x, imp.y - p.y) * (imp.state === 'drink' ? 0.4 : 1); // drinkers first
           if (d < bd) { bd = d; best = imp; }
         }
         if (!best) { r.projectiles.splice(i, 1); continue; }
@@ -1946,7 +1969,7 @@ function boot() {
         const hx = tx, hly = ty;
         damageImp(p.target, p.x, p.y);
         if (p.red) for (const imp of r.imps) {
-          if ((imp.state === 'walk' || imp.state === 'taunt') && Math.hypot(imp.x - hx, imp.y - hly) < 84 && imp !== p.target) damageImp(imp, hx, hly);
+          if ((imp.state === 'walk' || imp.state === 'drink') && Math.hypot(imp.x - hx, imp.y - hly) < 84 && imp !== p.target) damageImp(imp, hx, hly);
         }
         r.projectiles.splice(i, 1);
       } else {
@@ -1957,7 +1980,7 @@ function boot() {
     if (r.shock) {
       r.shock.rad += 1050 * dt; r.shock.life -= dt * 1.3;
       for (const imp of r.imps) {
-        if ((imp.state === 'walk' || imp.state === 'taunt') && Math.hypot(imp.x - px, imp.y - py) < r.shock.rad) splatImp(imp);
+        if ((imp.state === 'walk' || imp.state === 'drink') && Math.hypot(imp.x - px, imp.y - py) < r.shock.rad) splatImp(imp);
       }
       if (r.shock.life <= 0) r.shock = null;
     }
@@ -1980,8 +2003,21 @@ function boot() {
       gctx.globalAlpha = 1;
       return;
     }
-    const hop = imp.state === 'taunt' ? Math.abs(Math.sin(imp.st * 9)) * 7 : 0;
-    const lean = imp.state === 'flee' ? (imp.vx < 0 ? -0.28 : 0.28) : clamp((imp.vx || 0) / 220, -0.18, 0.18) + wob * 0.05;
+    const hop = imp.state === 'drink' ? Math.abs(Math.sin(imp.st * 6)) * 3 : 0;
+    const lean = imp.state === 'flee' ? (imp.vx < 0 ? -0.28 : 0.28)
+      : imp.state === 'drink' ? Math.sin(imp.st * 6) * 0.1 - 0.12
+      : clamp((imp.vx || 0) / 220, -0.18, 0.18) + wob * 0.05;
+    if (imp.state === 'drink') {
+      // siphon of stolen ink, from the well to the imp's mouth
+      const well = wellPos();
+      gctx.strokeStyle = ACCENT; gctx.lineWidth = 1.5;
+      gctx.globalAlpha = 0.45 + Math.sin(imp.st * 12) * 0.2;
+      gctx.beginPath();
+      gctx.moveTo(well.x, well.y - 10);
+      gctx.quadraticCurveTo((well.x + imp.x) / 2, Math.min(well.y, imp.y) - 18, imp.x, imp.y - 12 * imp.s);
+      gctx.stroke();
+      gctx.globalAlpha = 1;
+    }
     gctx.save();
     gctx.translate(imp.x, imp.y - hop * imp.s);
     gctx.scale(imp.s, imp.s);
@@ -2013,12 +2049,36 @@ function boot() {
       gctx.beginPath(); gctx.ellipse(0, -12, 12, 11, 0, 0, Math.PI * 2); gctx.stroke();
     }
     gctx.restore();
-    if (imp.state === 'taunt') {
-      gctx.fillStyle = ACCENT;
-      gctx.font = 'italic 600 ' + Math.round(13 * imp.s) + 'px Palatino, Georgia, serif';
-      gctx.textAlign = 'center';
-      gctx.fillText('!', imp.x, imp.y - 36 * imp.s);
-    }
+  }
+
+  function drawInkwell() {
+    const r = G.run;
+    const w = wellPos();
+    const lvl = clamp(r.life / 100, 0, 1);
+    gctx.save();
+    gctx.strokeStyle = INK; gctx.lineWidth = 1.6;
+    gctx.fillStyle = PAPER;
+    // squat bottle: body, shoulder, neck
+    gctx.beginPath();
+    gctx.moveTo(w.x - 9, w.y);
+    gctx.lineTo(w.x - 9, w.y - 12);
+    gctx.quadraticCurveTo(w.x - 9, w.y - 16, w.x - 4, w.y - 17);
+    gctx.lineTo(w.x - 4, w.y - 21);
+    gctx.lineTo(w.x + 4, w.y - 21);
+    gctx.lineTo(w.x + 4, w.y - 17);
+    gctx.quadraticCurveTo(w.x + 9, w.y - 16, w.x + 9, w.y - 12);
+    gctx.lineTo(w.x + 9, w.y);
+    gctx.closePath();
+    gctx.fill();
+    // remaining ink — this is the life gauge, in the flesh
+    gctx.save();
+    gctx.clip();
+    gctx.fillStyle = ACCENT;
+    gctx.fillRect(w.x - 9, w.y - 15 * lvl, 18, 15 * lvl);
+    gctx.restore();
+    gctx.stroke();
+    line(w.x - 5, w.y - 21, w.x + 5, w.y - 21);
+    gctx.restore();
   }
 
   function drawPianist(t) {
@@ -2125,6 +2185,7 @@ function boot() {
 
     // — the pianist and the marginalia imps —
     drawPianist(Math.max(0, t));
+    drawInkwell();
     for (const imp of r.imps) drawImp(imp, Math.max(0, t));
     gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
     for (const p of r.projectiles) {
@@ -2375,7 +2436,7 @@ function boot() {
     let timing = (elh.early || elh.late)
       ? (elh.early > elh.late * 1.5 ? 'You tend to rush \u2014 breathe.' : elh.late > elh.early * 1.5 ? 'You tend to drag \u2014 anticipate.' : 'Nicely balanced timing.')
       : '';
-    if (r.impsEscaped) timing += (timing ? ' ' : '') + r.impsEscaped + (r.impsEscaped === 1 ? ' imp' : ' imps') + ' escaped with their mischief.';
+    if (r.impsEscaped) timing += (timing ? ' ' : '') + r.impsEscaped + (r.impsEscaped === 1 ? ' imp' : ' imps') + ' drank their fill from your inkwell.';
     $('rTiming').textContent = timing;
     $('rNewBest').style.display = isBest && prev ? 'inline-block' : (isBest && !prev ? 'inline-block' : 'none');
     if (raf) cancelAnimationFrame(raf);
