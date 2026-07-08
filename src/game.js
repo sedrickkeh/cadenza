@@ -918,7 +918,9 @@ const Sound = {
   sources: [], voices: 0, maxVoices: 56, volume: 0.85,
 
   ensure() {
-    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    // iOS: declare media playback so the ringer/silent switch doesn't mute us
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    if (this.ctx) { if (this.ctx.state !== 'running') this.ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
     this.comp = this.ctx.createDynamicsCompressor();
@@ -938,6 +940,14 @@ const Sound = {
     wet.connect(this.comp);
     this.comp.connect(this.master);
     this.master.connect(this.ctx.destination);
+    // silent one-sample kick inside the first user gesture — some mobile
+    // browsers won't route audio until something has actually played
+    try {
+      const b = this.ctx.createBufferSource();
+      b.buffer = this.ctx.createBuffer(1, 1, 22050);
+      b.connect(this.ctx.destination);
+      b.start(0);
+    } catch (e) {}
   },
 
   setVolume(v) { this.volume = v; if (this.master) this.master.gain.value = v; },
@@ -2312,6 +2322,15 @@ function boot() {
   }
   gc.addEventListener('touchend', endTouch);
   gc.addEventListener('touchcancel', endTouch);
+
+  // mobile browsers suspend/interrupt the audio context on lock, calls, or
+  // tab switches — re-arm it on the next gesture (unless we paused it on purpose)
+  function unlockAudio() {
+    if (Sound.ctx && Sound.ctx.state !== 'running' && !(G.run && G.run.paused)) Sound.ctx.resume();
+  }
+  window.addEventListener('touchstart', unlockAudio, { passive: true });
+  window.addEventListener('pointerdown', unlockAudio);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) unlockAudio(); });
   let mouseLane = -1;
   gc.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && G.run) {
